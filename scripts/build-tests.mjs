@@ -8,6 +8,11 @@ await build({
   external: ["@bitwarden/sdk-napi", "@bitwarden/sdk-napi-linux-x64-gnu"],
 });
 await build({
+  entryPoints: ["src/adapters/bitwarden.ts"], bundle: true, platform: "node", format: "esm",
+  outfile: ".test-build/bitwarden-adapter.mjs", target: "node24", sourcemap: false,
+  external: ["@bitwarden/sdk-napi", "@bitwarden/sdk-napi-linux-x64-gnu"],
+});
+await build({
   entryPoints: ["src/settings-actions.ts"], bundle: true, platform: "node", format: "esm",
   outfile: ".test-build/settings-actions.js", target: "node24", sourcemap: false,
 });

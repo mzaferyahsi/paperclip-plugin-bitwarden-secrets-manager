@@ -60,3 +60,9 @@ To stop activity, set `enabled` to `false` in the native plugin config. This doe
 - Archive through PATCH with `status: "archived"`. DELETE marks secrets deleted and invokes provider deletion.
 - The current native Secrets REST routes require board access. A secrets-only API scope is not available in the inspected CLI. Live setup needs an explicitly approved credential; development must not infer that approval.
 - Company `secret_ref` and per-user `user_secret_ref` are different native paths. The latter requires native user-secret definitions and values owned by the authenticated user.
+
+### Credential redaction verification
+
+`npm test` captures stdout and stderr from the installed native SDK at Error level while it rejects a unique malformed fixture token before authentication or network access. The adapter fixture also supplies a synthetic raw SDK error containing unique token and secret-value markers and verifies that only a typed error code escapes. A runtime fixture sends a synthetic value through `ctx.http.fetch` and verifies it is absent from plugin state, activity, action results, and span records. The request itself necessarily contains its bearer header and value body at the host transport boundary.
+
+The installed Paperclip SDK/server version (`2026.1005.0`) was also inspected locally. Its `plugin-sdk/dist/host-client-factory.js` forwards `http.fetch` parameters to the host HTTP service. The server's `dist/services/plugin-host-services.js` HTTP handler validates the destination and calls `executePinnedHttpRequest` without recording a span or logging request headers/body. This platform build therefore has no HTTP request-trace sink to capture for this path. These fixtures do not exercise successful Bitwarden authentication or prove behavior for every native SDK internal error; no live credential was used.
