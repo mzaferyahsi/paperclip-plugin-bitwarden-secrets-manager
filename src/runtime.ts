@@ -1,5 +1,10 @@
 import type { PluginContext, PluginJobContext } from "@paperclipai/plugin-sdk";
 import { isSecretRef, validateConfig, type BsmConfig } from "./config.js";
+import { createAuthenticatedBitwardenSdk } from "./adapters/bitwarden.js";
+import { AdapterError, type HttpRequest, type HttpResponse, type HttpTransport } from "./adapters/types.js";
+import { PaperclipSecretsAdapter } from "./adapters/paperclip.js";
+import { syncCompany, type SyncState } from "./sync.js";
+import type { BsmSdk } from "./adapters/types.js";
 
 const STATE_KEY = "runtime";
 const RUN_BUDGET_MS = 4 * 60_000;
@@ -11,6 +16,10 @@ type State = {
   warningCode?: string;
   runtimeRefIds?: string[];
   processedCompanies?: number;
+  configFingerprint?: string;
+  itemJournal?: SyncState["itemJournal"];
+  destinationVersions?: Record<string, number>;
+  absenceEvidence?: SyncState["absenceEvidence"];
 };
 
 function stateScope(companyId: string) { return { scopeKind: "company" as const, scopeId: companyId, stateKey: STATE_KEY }; }
@@ -32,7 +41,8 @@ async function writeStatus(ctx: PluginContext, companyId: string, patch: Partial
   await ctx.state.set(stateScope(companyId), { ...prior, ...patch });
 }
 
-async function syncCompanies(ctx: PluginContext, job: PluginJobContext | null, onlyCompanyId?: string) {
+async function syncCompanies(ctx: PluginContext, job: PluginJobContext | null, onlyCompanyId?: string,
+  explicitManual = job === null || job?.trigger === "manual", dependencies: RuntimeDependencies = {}) {
   const started = Date.now();
   const scheduledAt = job?.scheduledAt ?? new Date(started).toISOString();
   const scheduledMs = dateMillis(scheduledAt) ?? started;
@@ -71,6 +81,12 @@ async function syncCompanies(ctx: PluginContext, job: PluginJobContext | null, o
       await writeStatus(ctx, companyId, { status: "credential_cooldown" });
       continue;
     }
+    const authorizationBlocked = state.errorCode === "paperclip_credential_expired_or_revoked" ||
+      state.errorCode === "paperclip_permission_denied" || state.errorCode === "configuration_required";
+    if (authorizationBlocked && !explicitManual) {
+      await writeStatus(ctx, companyId, { status: "configuration_required" });
+      continue;
+    }
     if (job?.trigger === "schedule") {
       const interval = Math.max(5, Number(config.syncIntervalMinutes ?? 15)) * 60_000;
       const anchor = dateMillis(state.scheduledAnchor);
@@ -84,6 +100,8 @@ async function syncCompanies(ctx: PluginContext, job: PluginJobContext | null, o
           warningCode: "clock_anchor_reset", scheduledAnchor: scheduledAt,
           ...(nextEligibilityCorrupt ? { nextEligibleAt: undefined } : {}),
         });
+        state = { ...state, warningCode: "clock_anchor_reset", scheduledAnchor: scheduledAt,
+          ...(nextEligibilityCorrupt ? { nextEligibleAt: undefined } : {}) };
         await ctx.activity.log({ companyId, message: "Scheduled cadence was reset after a backwards clock step.", entityType: "company", entityId: companyId, metadata: { code: "clock_anchor_reset" } });
       } else if (next !== null && scheduledMs < next - 60_000) {
         await writeStatus(ctx, companyId, { status: "skipped_early_tick" });
@@ -97,26 +115,61 @@ async function syncCompanies(ctx: PluginContext, job: PluginJobContext | null, o
       await writeStatus(ctx, companyId, { lastAttemptAt: attemptAt, status: "configuration_required", errorCode: configError });
       continue;
     }
-    // Adapter and sync application are integrated by the assigned adapter/integration stages.
-    // This package shell validates bound refs without reading or persisting their values.
     if (!isSecretRef(config.bsmAccessToken) || !isSecretRef(config.paperclipApiToken)) continue;
     try {
-      await ctx.secrets.resolve(config.bsmAccessToken, { companyId, configPath: "bsmAccessToken" });
-      await ctx.secrets.resolve(config.paperclipApiToken, { companyId, configPath: "paperclipApiToken" });
-      await writeStatus(ctx, companyId, { lastAttemptAt: attemptAt, status: "credentials_ready", errorCode: undefined, runtimeRefIds: currentRefs });
-    } catch {
-      await writeStatus(ctx, companyId, { lastAttemptAt: attemptAt, status: "configuration_required", errorCode: "credential_unavailable" });
-      continue;
+      const [bsmToken, paperclipToken] = await Promise.all([
+        ctx.secrets.resolve(config.bsmAccessToken, { companyId, configPath: "bsmAccessToken" }),
+        ctx.secrets.resolve(config.paperclipApiToken, { companyId, configPath: "paperclipApiToken" }),
+      ]);
+      const sdk = await (dependencies.createSdk ?? createAuthenticatedBitwardenSdk)(bsmToken, config.bitwardenRegion === "EU" ? "EU" : "US");
+      const transport = (dependencies.createTransport ?? nativeTransport)(ctx, config.paperclipApiOrigin!, paperclipToken);
+      const previousState = state as SyncState;
+      const updated = await syncCompany(config, {
+        sdk,
+        native: new PaperclipSecretsAdapter(transport, companyId),
+        previousState,
+        stateFingerprint: previousState.configFingerprint,
+        generation: previousState.generation,
+        destinationVersions: previousState.destinationVersions,
+        absenceEvidence: previousState.absenceEvidence,
+        now: Date.now,
+        deadlineAt: started + RUN_BUDGET_MS,
+        save: async next => {
+          await ctx.state.set(stateScope(companyId), {
+            ...next, runtimeRefIds: currentRefs,
+            processedCompanies: processed + 1,
+          });
+        },
+      });
+      state = updated;
+      processed += 1;
+      await ctx.activity.log({
+        companyId, message: "Bitwarden sync finished with sanitized status.", entityType: "company", entityId: companyId,
+        metadata: { status: updated.status, errorCode: updated.errorCode ?? null, generation: updated.generation },
+      });
+    } catch (error) {
+      const errorCode = error instanceof AdapterError ? error.code : "remote_unavailable";
+      const retryAfter = error instanceof AdapterError ? error.retryAfterMs : undefined;
+      const backoff = errorCode === "paperclip_rate_limited" ? Math.min(60 * 60_000, Math.max(60_000, retryAfter ?? 5 * 60_000)) :
+        ["remote_unavailable", "paperclip_unavailable", "ambiguous_write"].includes(errorCode) ? Math.min(60 * 60_000, 60_000 * (2 ** Math.min(6, Number(state.generation ?? 0)))) : undefined;
+      await writeStatus(ctx, companyId, {
+        lastAttemptAt: attemptAt, status: errorCode === "configuration_required" || errorCode.startsWith("paperclip_credential") || errorCode === "paperclip_permission_denied" ? "configuration_required" : "partial",
+        errorCode, ...(backoff ? { nextEligibleAt: new Date(Date.now() + backoff).toISOString() } : {}),
+      });
+      await ctx.activity.log({ companyId, message: "Bitwarden sync stopped with a sanitized error.", entityType: "company", entityId: companyId, metadata: { errorCode } });
     }
-    processed += 1;
-    await ctx.activity.log({ companyId, message: "Bitwarden sync credentials are available.", entityType: "company", entityId: companyId, metadata: { status: "credentials_ready" } });
   }
   return { status: Date.now() - started >= RUN_BUDGET_MS || companyListTruncated ? "partial" : "ok", processedCompanies: processed };
 }
 
-export function registerRuntime(ctx: PluginContext) {
+export type RuntimeDependencies = {
+  createSdk?: (token: string, region: "US" | "EU") => Promise<BsmSdk>;
+  createTransport?: (ctx: PluginContext, origin: string, token: string) => HttpTransport;
+};
+
+export function registerRuntime(ctx: PluginContext, dependencies: RuntimeDependencies = {}) {
   ctx.jobs.register("bsm-sync", async (job) => {
-    await withRunLock(async () => { await syncCompanies(ctx, job); return { status: "ok" }; });
+    await withRunLock(async () => syncCompanies(ctx, job, undefined, job.trigger === "manual", dependencies));
   });
   ctx.data.register("worker-health", async () => ({ status: "available" }));
   ctx.actions.register("get-status", async (_params, actionContext) => {
@@ -133,6 +186,29 @@ export function registerRuntime(ctx: PluginContext) {
   ctx.actions.register("resync", async (_params, actionContext) => {
     const actor = actionContext.actor;
     if (actor.type !== "user" || !actor.userId || !actionContext.companyId) return { status: "denied", errorCode: "user_context_required" };
-    return withRunLock(async () => syncCompanies(ctx, null, actionContext.companyId!));
+    return withRunLock(async () => syncCompanies(ctx, null, actionContext.companyId!, true, dependencies));
   });
+}
+
+function nativeTransport(ctx: PluginContext, origin: string, token: string): HttpTransport {
+  const base = new URL(origin);
+  if (base.protocol !== "https:" || base.username || base.password || base.pathname !== "/" || base.search || base.hash) {
+    throw new AdapterError("invalid_input");
+  }
+  return async (request: HttpRequest): Promise<HttpResponse> => {
+    if (!request.path.startsWith("/api/") || request.path.startsWith("//")) throw new AdapterError("invalid_input");
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15_000);
+    try {
+      const response = await ctx.http.fetch(`${base.origin}${request.path}`, {
+        method: request.method, redirect: "error", signal: controller.signal,
+        headers: { Authorization: `Bearer ${token}`, Accept: "application/json", ...(request.body === undefined ? {} : { "Content-Type": "application/json" }) },
+        ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
+      });
+      return { status: response.status, headers: response.headers, json: async () => response.json() };
+    } catch (error) {
+      if (error instanceof AdapterError) throw error;
+      throw error;
+    } finally { clearTimeout(timeout); }
+  };
 }

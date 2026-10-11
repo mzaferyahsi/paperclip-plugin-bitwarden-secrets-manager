@@ -12,7 +12,7 @@
     "validate:manifest": "node scripts/validate-manifest.mjs",
     "check:bitwarden-deps": "node scripts/check-bitwarden-deps.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "node scripts/build-tests.mjs && node --test"
+    "test": "node scripts/build-tests.mjs && node --test tests/*.test.mjs .test-build/*.test.mjs"
   },
   "dependencies": {
     "@bitwarden/sdk-napi": "1.0.0",

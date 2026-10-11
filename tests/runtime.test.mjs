@@ -29,7 +29,10 @@ function fakeContext(companyConfigs, seeded = {}, resolveImpl = async () => "fix
     secrets: { resolve: async (secretRef, options) => { resolved.push({ secretRef, options }); return resolveImpl(secretRef, options); } },
     activity: { log: async () => {} },
   };
-  registerRuntime(ctx);
+  registerRuntime(ctx, {
+    createSdk: async () => ({ listSecretIds: async () => [], getSecrets: async () => [] }),
+    createTransport: () => async () => ({ status: 200, json: async () => [] }),
+  });
   return { handlers, state, resolved };
 }
 
@@ -41,7 +44,7 @@ test("scheduled job enumerates companies and resolves refs with company and conf
     { companyId: "companyA", configPath: "bsmAccessToken" },
     { companyId: "companyA", configPath: "paperclipApiToken" },
   ]);
-  assert.equal(state.get("companyA/runtime").status, "credentials_ready");
+  assert.equal(state.get("companyA/runtime").status, "success");
   assert.equal(state.has("companyB/runtime"), false);
   assert.equal(JSON.stringify([...state.values()]).includes("fixture-secret-value"), false);
 });
@@ -80,7 +83,7 @@ test("a second entry point returns already_running while the first run still hol
   await new Promise((resolve) => setImmediate(resolve));
   const action = await handlers.actions.resync({}, { actor: { type: "user", userId: "user", companyId: "companyA" }, companyId: "companyA" });
   assert.deepEqual(action, { status: "already_running" });
-  assert.equal(resolved.length, 1);
+  assert.equal(resolved.length, 2);
   release("credential");
   await scheduled;
 });

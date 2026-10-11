@@ -11,10 +11,17 @@ function safeSegment(value: string): string {
   return encodeURIComponent(value);
 }
 
-function classifyStatus(status: number, writing: boolean): AdapterError {
+function classifyStatus(response: HttpResponse, writing: boolean): AdapterError {
+  const status = response.status;
   if (status === 401) return new AdapterError("paperclip_credential_expired_or_revoked");
   if (status === 403) return new AdapterError("paperclip_permission_denied");
-  if (status === 429) return new AdapterError("paperclip_rate_limited", true);
+  if (status === 429) {
+    const raw = response.headers?.get("retry-after");
+    const seconds = raw && /^\d+(?:\.\d+)?$/.test(raw) ? Number(raw) : NaN;
+    const date = raw ? Date.parse(raw) : NaN;
+    const retryAfterMs = Number.isFinite(seconds) ? Math.max(0, seconds * 1000) : Number.isFinite(date) ? Math.max(0, date - Date.now()) : undefined;
+    return new AdapterError("paperclip_rate_limited", true, retryAfterMs);
+  }
   if (writing) return new AdapterError("ambiguous_write");
   return new AdapterError("paperclip_unavailable", status >= 500);
 }
@@ -27,7 +34,7 @@ async function request(transport: HttpTransport, req: HttpRequest): Promise<unkn
     throw new AdapterError(req.method === "GET" ? "paperclip_unavailable" : "ambiguous_write", req.method === "GET");
   }
   if (response.status < 200 || response.status >= 300) {
-    throw classifyStatus(response.status, req.method !== "GET");
+    throw classifyStatus(response, req.method !== "GET");
   }
   try {
     return await response.json();

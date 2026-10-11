@@ -33,8 +33,8 @@ test("BWSM snapshot fetches complete selected values and rejects partial batches
   assert.equal(snapshot.complete, true);
   assert.deepEqual(snapshot.secrets, [source]);
   const wrapped = bitwardenSdkAdapter({ secrets: () => ({
-    list: async () => [{ id: source.id, organizationId: source.organizationId, projectId: source.projectId }],
-    getByIds: async () => [source],
+    list: async () => ({ success: true, data: { data: [{ id: source.id, organizationId: source.organizationId }] } }),
+    getByIds: async () => ({ success: true, data: { data: [source] } }),
   }) });
   assert.deepEqual((await readBsmSnapshot(wrapped, "org-1", new Set(["project-1"]))).secrets, [source]);
   await assert.rejects(() => readBsmSnapshot({ ...sdk, getSecrets: async () => [] }, "org-1", new Set(["project-1"])),

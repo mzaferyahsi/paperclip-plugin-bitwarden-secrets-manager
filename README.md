@@ -4,7 +4,7 @@
 
 This repository packages a Paperclip plugin for mirroring selected Bitwarden Secrets Manager items into native company secrets. The plugin uses native assignment, versioning, usage, access events, and authorization. It does not add a secret provider or modify the Paperclip server.
 
-The `bwsm-a` package/runtime stage provides the installable shell and credential setup path. It reports `credentials_ready` after checking bound refs; it does not claim a completed sync. The separate integration stage must add source reads and native diff/apply before enabling sync for a live company.
+The worker reads selected Bitwarden Secrets Manager values and reconciles them with owned native company secrets. It stores only non-value journal and version metadata. Live synchronization remains disabled until an operator configures approved credentials and explicitly enables a company.
 
 ## Build
 
@@ -29,6 +29,12 @@ Configure a disabled company plugin record first. Set the Paperclip API origin, 
 The settings page offers **Enter token** and **Select existing secret**. Entered values are sent once through the worker action and stored through the native encrypted secret endpoint. The plugin config stores a native `secret_ref` object, never the value. Selection shows metadata only and accepts any active native provider. Initial saves leave sync disabled. Review the native secret reference and plugin binding before enabling sync. See the accepted task plan for full operator and rotation procedures.
 
 The plugin accepts company destinations only in v0.1. It rejects user-secret destinations. The manifest job ticks every five minutes; company settings may select a cadence of five minutes or greater, rounded to the next tick.
+
+## Sync and recovery
+
+The worker fetches a complete source snapshot and the native destination inventory before it writes. It matches secrets by organization and Bitwarden secret UUID, so renames and project moves within the allowlist preserve the native secret ID, key, and bindings. Source revisions and native latest versions detect source changes and native value drift. Restart recovery uses deterministic destination keys and a non-value item journal; ambiguous rotation responses can result in one repeat version if the native version marker is unavailable.
+
+Removal is opt-in. The worker archives only plugin-owned active secrets after two complete absences under an unchanged organization, project, source-ref, and key-prefix scope. An incomplete snapshot, failed apply, changed scope, or expired run budget suppresses removals. Archived reappearance is reported for operator handling; the worker does not reactivate stale values. Sync runs stop starting writes after four minutes and process at most 500 source IDs because the Bitwarden SDK does not expose pagination in the inspected contract.
 
 ## Disable and rotate
 

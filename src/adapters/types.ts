@@ -15,39 +15,44 @@ export type AdapterErrorCode =
 export class AdapterError extends Error {
   readonly code: AdapterErrorCode;
   readonly retryable: boolean;
+  readonly retryAfterMs?: number;
 
-  constructor(code: AdapterErrorCode, retryable = false) {
+  constructor(code: AdapterErrorCode, retryable = false, retryAfterMs?: number) {
     super(code);
     this.name = "AdapterError";
     this.code = code;
     this.retryable = retryable;
+    this.retryAfterMs = retryAfterMs;
   }
 }
 
 export interface BsmSecret {
   id: string;
   organizationId: string;
-  projectId: string;
+  projectId: string | null;
   key: string;
   value: string;
   revisionDate: string;
   archived?: boolean;
 }
 
+export type SelectedBsmSecret = BsmSecret & { projectId: string };
+
 export interface BsmSecretSummary {
   id: string;
   organizationId: string;
-  projectId: string;
+  projectId?: string;
 }
 
 export interface BsmSdk {
   listSecretIds(organizationId: string): Promise<readonly BsmSecretSummary[]>;
   getSecrets(ids: readonly string[]): Promise<readonly BsmSecret[]>;
+  listProjects?(organizationId: string): Promise<readonly { id: string; organizationId: string }[]>;
 }
 
 export interface BsmSnapshot {
   complete: boolean;
-  secrets: readonly BsmSecret[];
+  secrets: readonly SelectedBsmSecret[];
   skippedCount: number;
 }
 
