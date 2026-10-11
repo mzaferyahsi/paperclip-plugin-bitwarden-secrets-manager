@@ -56,6 +56,7 @@ export async function readBsmSnapshot(
 
     const ids = listed.filter(row => selectedProjectIds.has(row.projectId)).map(row => row.id);
     const records: BsmSecret[] = [];
+    let complete = true;
     for (let offset = 0; offset < ids.length; offset += batchSize) {
       const batchIds = ids.slice(offset, offset + batchSize);
       const batch = await sdk.getSecrets(batchIds);
@@ -69,11 +70,17 @@ export async function readBsmSnapshot(
         if (secret.organizationId !== organizationId || secret.organizationId !== summary.organizationId || secret.projectId !== summary.projectId) {
           throw new AdapterError("snapshot_incomplete");
         }
-        if (secret.archived || !secret.value.trim()) continue;
+        if (secret.archived) continue;
+        // A listed but unusable value is not evidence of absence. Mark the
+        // snapshot partial so callers cannot use it to authorize removals.
+        if (!secret.value.trim()) {
+          complete = false;
+          continue;
+        }
         records.push(secret);
       }
     }
-    return { complete: true, secrets: records, skippedCount: ids.length - records.length };
+    return { complete, secrets: records, skippedCount: ids.length - records.length };
   } catch (error) {
     if (error instanceof AdapterError) throw error;
     // The native SDK exposes plain Error strings. Never return/log those messages.

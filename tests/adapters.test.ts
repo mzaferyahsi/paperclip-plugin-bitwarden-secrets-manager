@@ -39,6 +39,15 @@ test("BWSM snapshot fetches complete selected values and rejects partial batches
   assert.deepEqual((await readBsmSnapshot(wrapped, "org-1", new Set(["project-1"]))).secrets, [source]);
   await assert.rejects(() => readBsmSnapshot({ ...sdk, getSecrets: async () => [] }, "org-1", new Set(["project-1"])),
     (error: unknown) => error instanceof AdapterError && error.code === "snapshot_incomplete");
+  const whitespaceSnapshot = await readBsmSnapshot({
+    listSecretIds: async () => [
+      { id: source.id, organizationId: source.organizationId, projectId: source.projectId },
+    ],
+    getSecrets: async () => [{ ...source, value: " \t\n " }],
+  }, "org-1", new Set(["project-1"]));
+  assert.equal(whitespaceSnapshot.complete, false);
+  assert.deepEqual(whitespaceSnapshot.secrets, []);
+  assert.equal(whitespaceSnapshot.skippedCount, 1);
 });
 
 test("native create, token-secret create and plugin config save use exact contracts", async () => {
