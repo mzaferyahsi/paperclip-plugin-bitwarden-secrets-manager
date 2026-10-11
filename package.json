@@ -3,6 +3,11 @@
   "version": "0.1.0",
   "private": false,
   "type": "module",
+  "paperclipPlugin": {
+    "manifest": "./dist/manifest.js",
+    "worker": "./dist/worker.js",
+    "ui": "./dist/ui.js"
+  },
   "engines": { "node": ">=24.11.0" },
   "files": ["manifest.json", "dist", "LICENSE", "NOTICE.md", "README.md"],
   "scripts": {
