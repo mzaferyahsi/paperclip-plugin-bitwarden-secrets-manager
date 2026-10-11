@@ -1,3 +1,4 @@
+import { access, readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -9,6 +10,28 @@ const { BitwardenClient } = require("@bitwarden/sdk-napi");
 const client = new BitwardenClient();
 if (!client) throw new Error("Bitwarden SDK client did not initialize");
 const packageRoot = path.join(path.resolve(modulesRoot), "paperclip-plugin-bitwarden-secrets-manager");
+const packageJson = JSON.parse(await readFile(path.join(packageRoot, "package.json"), "utf8"));
+const plugin = packageJson.paperclipPlugin;
+if (!plugin || typeof plugin.manifest !== "string") {
+  throw new Error("Packed plugin package does not declare paperclipPlugin.manifest");
+}
+const manifestPath = path.resolve(packageRoot, plugin.manifest);
+if (!manifestPath.startsWith(`${packageRoot}${path.sep}`)) {
+  throw new Error("Packed manifest entrypoint escapes the package root");
+}
+const manifestModule = await import(pathToFileURL(manifestPath));
+const manifest = manifestModule.default ?? manifestModule;
+if (manifest.id !== "mzaferyahsi.bitwarden-secrets-manager-sync"
+  || manifest.entrypoints?.worker !== plugin.worker
+  || manifest.entrypoints?.ui !== plugin.ui) {
+  throw new Error("Packed ESM manifest does not match host-discoverable package entrypoints");
+}
+for (const key of ["manifest", "worker", "ui"]) {
+  if (typeof plugin[key] !== "string") throw new Error(`Packed plugin entrypoint is missing: ${key}`);
+  const entrypoint = path.resolve(packageRoot, plugin[key]);
+  if (!entrypoint.startsWith(`${packageRoot}${path.sep}`)) throw new Error(`Packed plugin entrypoint escapes package root: ${key}`);
+  await access(entrypoint);
+}
 const worker = await import(pathToFileURL(path.join(packageRoot, "dist/worker.js")));
 const ui = await import(pathToFileURL(path.join(packageRoot, "dist/ui.js")));
 if (!worker.default || typeof ui.BsmSettingsPage !== "function" || typeof ui.BsmStatusWidget !== "function") {

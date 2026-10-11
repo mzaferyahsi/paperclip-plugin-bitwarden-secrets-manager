@@ -1,4 +1,17 @@
 import { build } from "esbuild";
+import { readFile } from "node:fs/promises";
+
+const manifest = JSON.parse(await readFile("manifest.json", "utf8"));
+await build({
+  stdin: {
+    contents: `export default ${JSON.stringify(manifest)};`,
+    resolveDir: process.cwd(),
+    sourcefile: "manifest.generated.js",
+    loader: "js",
+  },
+  bundle: true, platform: "node", format: "esm", outfile: "dist/manifest.js",
+  target: "node24", sourcemap: false,
+});
 
 await build({
   entryPoints: ["src/worker.ts"], bundle: true, platform: "node", format: "esm",
