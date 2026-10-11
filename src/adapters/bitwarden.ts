@@ -1,6 +1,38 @@
 import { AdapterError } from "./types.js";
 import type { BsmSdk, BsmSecret, BsmSnapshot } from "./types.js";
 
+/** Small structural boundary around the official SDK; native SDK types stay outside callers. */
+export interface BitwardenClientLike {
+  secrets(): {
+    list(organizationId: string): Promise<readonly {
+      id?: string; organizationId?: string; projectId?: string;
+    }[]>;
+    getByIds(ids: readonly string[]): Promise<readonly {
+      id?: string; organizationId?: string; projectId?: string; key?: string;
+      value?: string; revisionDate?: string; archived?: boolean;
+    }[]>;
+  };
+}
+
+export function bitwardenSdkAdapter(client: BitwardenClientLike): BsmSdk {
+  return {
+    async listSecretIds(organizationId) {
+      const rows = await client.secrets().list(organizationId);
+      if (rows.some(row => !row.id || !row.organizationId || !row.projectId)) throw new AdapterError("snapshot_incomplete");
+      return rows.map(row => ({ id: row.id!, organizationId: row.organizationId!, projectId: row.projectId! }));
+    },
+    async getSecrets(ids) {
+      const rows = await client.secrets().getByIds(ids);
+      if (rows.some(row => !row.id || !row.organizationId || !row.projectId || row.key === undefined ||
+        row.value === undefined || !row.revisionDate)) throw new AdapterError("snapshot_incomplete");
+      return rows.map(row => ({
+        id: row.id!, organizationId: row.organizationId!, projectId: row.projectId!, key: row.key!,
+        value: row.value!, revisionDate: row.revisionDate!, ...(row.archived === undefined ? {} : { archived: row.archived }),
+      }));
+    },
+  };
+}
+
 /** Read all selected source values before exposing a snapshot to diff/apply code. */
 export async function readBsmSnapshot(
   sdk: BsmSdk,

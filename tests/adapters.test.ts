@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readBsmSnapshot } from "../src/adapters/bitwarden.js";
+import { bitwardenSdkAdapter, readBsmSnapshot } from "../src/adapters/bitwarden.js";
 import {
   AdapterError, type BsmSecret, type HttpRequest, type HttpResponse, type NativeSecret,
 } from "../src/adapters/types.js";
@@ -32,6 +32,11 @@ test("BWSM snapshot fetches complete selected values and rejects partial batches
   const snapshot = await readBsmSnapshot(sdk, "org-1", new Set(["project-1"]));
   assert.equal(snapshot.complete, true);
   assert.deepEqual(snapshot.secrets, [source]);
+  const wrapped = bitwardenSdkAdapter({ secrets: () => ({
+    list: async () => [{ id: source.id, organizationId: source.organizationId, projectId: source.projectId }],
+    getByIds: async () => [source],
+  }) });
+  assert.deepEqual((await readBsmSnapshot(wrapped, "org-1", new Set(["project-1"]))).secrets, [source]);
   await assert.rejects(() => readBsmSnapshot({ ...sdk, getSecrets: async () => [] }, "org-1", new Set(["project-1"])),
     (error: unknown) => error instanceof AdapterError && error.code === "snapshot_incomplete");
 });
