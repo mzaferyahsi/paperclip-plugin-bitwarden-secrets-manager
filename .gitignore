@@ -4,3 +4,7 @@ coverage/
 .env
 .env.*
 *.log
+node_modules/
+dist/
+.test-build/
+*.tgz
