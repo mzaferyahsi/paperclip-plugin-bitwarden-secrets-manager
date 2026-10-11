@@ -1,0 +1,30 @@
+{
+  "name": "paperclip-plugin-bitwarden-secrets-manager",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "engines": { "node": ">=24.11.0" },
+  "files": ["manifest.json", "dist", "LICENSE", "NOTICE.md", "README.md"],
+  "scripts": {
+    "clean": "rm -rf dist",
+    "build": "npm run clean && node scripts/build.mjs",
+    "pack:check": "npm pack --dry-run",
+    "validate:manifest": "node scripts/validate-manifest.mjs",
+    "check:bitwarden-deps": "node scripts/check-bitwarden-deps.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node scripts/build-tests.mjs && node --test"
+  },
+  "dependencies": {
+    "@bitwarden/sdk-napi": "1.0.0",
+    "@bitwarden/sdk-napi-linux-x64-gnu": "1.0.0",
+    "@paperclipai/plugin-sdk": "2026.1005.0",
+    "react": "19.2.0"
+  },
+  "devDependencies": {
+    "@paperclipai/shared": "2026.1005.0",
+    "@types/node": "24.10.0",
+    "@types/react": "19.2.18",
+    "esbuild": "0.25.11",
+    "typescript": "5.9.3"
+  }
+}

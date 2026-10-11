@@ -1,0 +1,29 @@
+name: Package
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  linux-x64-gnu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run check:bitwarden-deps
+      - run: npm run validate:manifest
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: npm pack --dry-run
+      - name: Install the packed artifact into a clean prefix
+        run: |
+          npm pack --pack-destination "$RUNNER_TEMP"
+          mkdir -p "$RUNNER_TEMP/bwsm-smoke"
+          npm install --prefix "$RUNNER_TEMP/bwsm-smoke" --ignore-scripts --no-save "$RUNNER_TEMP/paperclip-plugin-bitwarden-secrets-manager-0.1.0.tgz"
+      - name: Verify packaged native addon smoke
+        run: node scripts/smoke-packed.mjs "$RUNNER_TEMP/bwsm-smoke/node_modules"

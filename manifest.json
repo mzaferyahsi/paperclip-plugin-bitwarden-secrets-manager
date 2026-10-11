@@ -1,0 +1,50 @@
+{
+  "id": "mzaferyahsi.bitwarden-secrets-manager-sync",
+  "apiVersion": 1,
+  "version": "0.1.0",
+  "displayName": "Bitwarden Secrets Manager Sync",
+  "description": "Sync selected Bitwarden Secrets Manager items into native company secrets.",
+  "author": "mzaferyahsi",
+  "categories": ["connector"],
+  "capabilities": [
+    "companies.read", "jobs.schedule", "secrets.read-ref", "http.outbound",
+    "plugin.state.read", "plugin.state.write", "activity.log.write",
+    "ui.dashboardWidget.register", "ui.action.register", "instance.settings.register"
+  ],
+  "entrypoints": { "worker": "./dist/worker.js", "ui": "./dist/ui.js" },
+  "instanceConfigSchema": {
+    "type": "object",
+    "properties": {
+      "enabled": { "type": "boolean", "default": false },
+      "bsmAccessToken": { "$ref": "#/$defs/secretRef" },
+      "paperclipApiToken": { "$ref": "#/$defs/secretRef" },
+      "paperclipSetupApiToken": { "$ref": "#/$defs/secretRef" },
+      "bsmOrganizationId": { "type": "string", "format": "uuid" },
+      "bsmProjectIds": { "type": "array", "items": { "type": "string", "format": "uuid" }, "uniqueItems": true, "minItems": 1 },
+      "paperclipApiOrigin": { "type": "string", "format": "uri" },
+      "destinationScope": { "type": "string", "const": "company", "default": "company" },
+      "syncIntervalMinutes": { "type": "integer", "minimum": 5, "default": 15 },
+      "targetSecretKeyPrefix": { "type": "string", "maxLength": 47, "pattern": "^[A-Za-z0-9._-]+$", "default": "bitwarden." },
+      "archiveOnRemoval": { "type": "boolean", "default": false },
+      "bitwardenRegion": { "type": "string", "enum": ["US", "EU"], "default": "US" }
+    },
+    "$defs": {
+      "secretRef": {
+        "type": "object", "required": ["type", "secretId"], "additionalProperties": false,
+        "properties": {
+          "type": { "const": "secret_ref" },
+          "secretId": { "type": "string", "format": "uuid" },
+          "version": { "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "string", "const": "latest" }], "default": "latest" }
+        }
+      }
+    },
+    "additionalProperties": false
+  },
+  "jobs": [{ "jobKey": "bsm-sync", "displayName": "Sync Bitwarden secrets", "schedule": "*/5 * * * *" }],
+  "ui": {
+    "slots": [
+      { "type": "dashboardWidget", "id": "bsm-status", "displayName": "Bitwarden Sync Status", "exportName": "BsmStatusWidget" },
+      { "type": "settingsPage", "id": "bsm-settings", "displayName": "Bitwarden Secrets Manager", "exportName": "BsmSettingsPage" }
+    ]
+  }
+}
