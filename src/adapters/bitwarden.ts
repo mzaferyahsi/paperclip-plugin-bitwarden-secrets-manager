@@ -1,5 +1,6 @@
 import { AdapterError } from "./types.js";
 import type { BsmSdk, BsmSecret, BsmSnapshot, SelectedBsmSecret } from "./types.js";
+import type { LogLevel } from "@bitwarden/sdk-napi";
 
 /** Small structural boundary around the official SDK; native SDK types stay outside callers. */
 export interface BitwardenClientLike {
@@ -79,7 +80,7 @@ export async function createAuthenticatedBitwardenSdk(token: string, region: "US
     identityUrl: `https://identity.bitwarden${suffix}`,
     deviceType: sdk.DeviceType.SDK,
     userAgent: "paperclip-plugin-bitwarden-secrets-manager-sync/0.1.0",
-  }, sdk.LogLevel.Error);
+  }, 4 as LogLevel);
   try {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {

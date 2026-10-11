@@ -6,7 +6,9 @@ const modulesRoot = process.argv[2];
 if (!modulesRoot) throw new Error("Expected a clean node_modules path");
 const require = createRequire(path.join(path.resolve(modulesRoot), "smoke.cjs"));
 const { BitwardenClient } = require("@bitwarden/sdk-napi");
-const client = new BitwardenClient();
+// LogLevel is a TypeScript const enum and is not exported at runtime. Error is
+// numeric level 4 in the pinned SDK API.
+const client = new BitwardenClient(undefined, 4);
 if (!client) throw new Error("Bitwarden SDK client did not initialize");
 const packageRoot = path.join(path.resolve(modulesRoot), "paperclip-plugin-bitwarden-secrets-manager");
 const worker = await import(pathToFileURL(path.join(packageRoot, "dist/worker.js")));
