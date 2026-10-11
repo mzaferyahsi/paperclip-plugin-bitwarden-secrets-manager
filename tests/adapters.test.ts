@@ -5,7 +5,7 @@ import {
   AdapterError, type BsmSecret, type HttpRequest, type HttpResponse, type NativeSecret,
 } from "../src/adapters/types.js";
 import {
-  PaperclipSecretsAdapter, assertSetupIdentity, createBootstrapTokenSecret, savePluginConfig,
+  PaperclipSecretsAdapter, assertSetupIdentity, createBootstrapTokenSecret, listSelectableSecrets, savePluginConfig,
 } from "../src/adapters/paperclip.js";
 
 const source: BsmSecret = {
@@ -45,6 +45,7 @@ test("native create, token-secret create and plugin config save use exact contra
   const calls: HttpRequest[] = [];
   const transport = async (call: HttpRequest) => {
     calls.push(call);
+    if (call.method === "GET") return reply(200, [{ id: "native-1", name: "Fixture", key: "owned", companyId: "company-1", status: "active" }]);
     return reply(200, { id: "native-1", name: "Fixture", key: "bitwarden.bootstrap.op", companyId: "company-1" });
   };
   const adapter = new PaperclipSecretsAdapter(transport, "company-1");
@@ -58,15 +59,40 @@ test("native create, token-secret create and plugin config save use exact contra
   assert.deepEqual(calls.map(({ method, path }) => [method, path]), [
     ["POST", "/api/companies/company-1/secrets"],
     ["POST", "/api/companies/company-1/secrets"],
+    ["GET", "/api/companies/company-1/secrets"],
     ["POST", "/api/plugins/plugin-id/config"],
   ]);
   assert.deepEqual(calls[1].body, {
     name: "Bitwarden token", key: "bitwarden.bootstrap.plugin.op", provider: "local_encrypted",
     managedMode: "paperclip_managed", value: "fixture-token",
   });
-  assert.deepEqual(calls[2].body, {
+  assert.deepEqual(calls[3].body, {
     companyId: "company-1", configJson: { enabled: false, bsmAccessToken: { type: "secret_ref", secretId: "native-1", version: "latest" } },
   });
+});
+
+test("config save validates active same-company native refs and picker rows fail closed", async () => {
+  const ref = { type: "secret_ref" as const, secretId: "native-1", version: "latest" as const };
+  for (const rows of [
+    [{ id: "native-1", name: "Foreign", key: "k", companyId: "other-company", status: "active" }],
+    [{ id: "native-1", name: "Archived", key: "k", companyId: "company-1", status: "archived" }],
+    [],
+  ]) {
+    const calls: HttpRequest[] = [];
+    await assert.rejects(() => savePluginConfig(async call => {
+      calls.push(call);
+      return reply(200, rows);
+    }, actor, identity, "plugin-id", {}, ref),
+    (error: unknown) => error instanceof AdapterError && error.code === "ownership_mismatch");
+    assert.deepEqual(calls.map(call => call.method), ["GET"]);
+  }
+  for (const malformed of [
+    [{ id: "native-1", key: "k", companyId: "company-1", status: "active" }],
+    [{ id: "native-1", name: "Nameless status", key: "k", companyId: "company-1" }],
+  ]) {
+    await assert.rejects(() => listSelectableSecrets(async () => reply(200, malformed), actor, identity),
+      (error: unknown) => error instanceof AdapterError && error.code === "snapshot_incomplete");
+  }
 });
 
 test("setup identity mismatch refuses before any request", async () => {

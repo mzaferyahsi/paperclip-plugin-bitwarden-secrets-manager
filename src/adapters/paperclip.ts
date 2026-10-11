@@ -37,10 +37,18 @@ async function request(transport: HttpTransport, req: HttpRequest): Promise<unkn
 }
 
 function asSecrets(value: unknown, companyId: string): NativeSecret[] {
-  if (!Array.isArray(value)) throw new AdapterError("paperclip_unavailable");
-  return value.filter((item): item is NativeSecret =>
-    !!item && typeof item === "object" && (item as NativeSecret).companyId === companyId &&
-    typeof (item as NativeSecret).id === "string" && typeof (item as NativeSecret).key === "string");
+  if (!Array.isArray(value)) throw new AdapterError("snapshot_incomplete");
+  return value.map(item => {
+    if (!item || typeof item !== "object") throw new AdapterError("snapshot_incomplete");
+    const row = item as Partial<NativeSecret>;
+    if (typeof row.id !== "string" || !row.id || typeof row.companyId !== "string" ||
+      typeof row.key !== "string" || typeof row.name !== "string" ||
+      (row.status !== "active" && row.status !== "archived" && row.status !== "deleted")) {
+      throw new AdapterError("snapshot_incomplete");
+    }
+    if (row.companyId !== companyId) throw new AdapterError("ownership_mismatch");
+    return row as NativeSecret;
+  });
 }
 
 export function sourceIdentityKey(orgId: string, secretId: string): string {
@@ -186,6 +194,11 @@ export async function savePluginConfig(
 ): Promise<void> {
   await assertSetupIdentity(actor, identity);
   if (!bsmRef.secretId || bsmRef.type !== "secret_ref") throw new AdapterError("invalid_input");
+  const secrets = await request(transport, {
+    method: "GET", path: `/api/companies/${safeSegment(actor.companyId)}/secrets`,
+  });
+  const refSecret = asSecrets(secrets, actor.companyId).find(secret => secret.id === bsmRef.secretId);
+  if (!refSecret || refSecret.status !== "active") throw new AdapterError("ownership_mismatch");
   await request(transport, {
     method: "POST", path: `/api/plugins/${safeSegment(pluginId)}/config`,
     body: { companyId: actor.companyId, configJson: { ...settings, bsmAccessToken: bsmRef } },
