@@ -155,3 +155,16 @@ test("unowned or unlisted native targets are refused before mutation", async () 
     (error: unknown) => error instanceof AdapterError && error.code === "ownership_mismatch");
   assert.equal(calls.length, 1);
 });
+
+test("accepts the unwrapped shape of the shipped SDK and maps thrown failures", async () => {
+  const sdk = bitwardenSdkAdapter({
+    secrets: () => ({
+      list: async () => ({ data: [{ id: "s1", organizationId: "o1" }] }),
+      getByIds: async () => { throw new Error("401 Unauthorized"); },
+    }),
+    projects: () => ({ list: async () => ({ data: [{ id: "p1", organizationId: "o1", name: "Staging" }] }) }),
+  } as any);
+  assert.deepEqual(await sdk.listSecretIds("o1"), [{ id: "s1", organizationId: "o1" }]);
+  assert.deepEqual(await sdk.listProjects!("o1"), [{ id: "p1", organizationId: "o1", name: "Staging" }]);
+  await assert.rejects(() => sdk.getSecrets(["s1"]), (e: any) => e.code === "configuration_required" || e.message === "configuration_required");
+});

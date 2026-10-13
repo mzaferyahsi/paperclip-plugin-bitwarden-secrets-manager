@@ -16,6 +16,22 @@ export interface BitwardenClientLike {
   };
 }
 
+/**
+ * The shipped SDK wrapper unwraps its response and throws on failure, so it returns `{data: rows}`.
+ * Fixtures and older typings use `{success, data: {data: rows}}`. Accept both; thrown errors are normalized.
+ */
+async function sdkRows<R>(call: () => Promise<any>): Promise<readonly R[] | undefined> {
+  let result: any;
+  try { result = await call(); } catch (error) {
+    throw error instanceof AdapterError ? error : normalizeSdkFailure(error instanceof Error ? error.message : "");
+  }
+  if (result && typeof result === "object" && "success" in result) {
+    if (!result.success) throw normalizeSdkFailure(result.errorMessage);
+    return Array.isArray(result.data?.data) ? result.data.data : undefined;
+  }
+  return Array.isArray(result?.data) ? result.data : undefined;
+}
+
 function normalizeSdkFailure(message?: string | null): AdapterError {
   const text = message ?? "";
   if (/\b401\b|unauthori[sz]ed|invalid.{0,20}token/i.test(text)) return new AdapterError("configuration_required");
@@ -36,18 +52,14 @@ export function bitwardenSdkAdapter(client: BitwardenClientLike): BsmSdk {
   };
   const adapter: BsmSdk = {
     async listSecretIds(organizationId) {
-      const result = await bounded(client.secrets().list(organizationId));
-      if (!result.success) throw normalizeSdkFailure(result.errorMessage);
-      if (!Array.isArray(result.data?.data)) throw new AdapterError("snapshot_incomplete");
-      const rows = result.data.data;
+      const rows = await bounded(sdkRows<any>(() => client.secrets().list(organizationId)));
+      if (!rows) throw new AdapterError("snapshot_incomplete");
       if (rows.some(row => !row.id || !row.organizationId)) throw new AdapterError("snapshot_incomplete");
       return rows.map(row => ({ id: row.id!, organizationId: row.organizationId! }));
     },
     async getSecrets(ids) {
-      const result = await bounded(client.secrets().getByIds([...ids]));
-      if (!result.success) throw normalizeSdkFailure(result.errorMessage);
-      if (!Array.isArray(result.data?.data)) throw new AdapterError("snapshot_incomplete");
-      const rows = result.data.data;
+      const rows = await bounded(sdkRows<any>(() => client.secrets().getByIds([...ids])));
+      if (!rows) throw new AdapterError("snapshot_incomplete");
       if (rows.some(row => !row.id || !row.organizationId || row.projectId === undefined || row.key === undefined ||
         row.value === undefined || !row.revisionDate)) throw new AdapterError("snapshot_incomplete");
       return rows.map(row => ({
@@ -59,10 +71,8 @@ export function bitwardenSdkAdapter(client: BitwardenClientLike): BsmSdk {
   };
   if (client.projects) {
     adapter.listProjects = async organizationId => {
-      const result = await bounded(client.projects!().list(organizationId));
-      if (!result.success) throw normalizeSdkFailure(result.errorMessage);
-      if (!Array.isArray(result.data?.data)) throw new AdapterError("snapshot_incomplete");
-      const rows = result.data.data;
+      const rows = await bounded(sdkRows<any>(() => client.projects!().list(organizationId)));
+      if (!rows) throw new AdapterError("snapshot_incomplete");
       if (rows.some(row => !row.id || !row.organizationId)) throw new AdapterError("snapshot_incomplete");
       return rows.map(row => ({ id: row.id!, organizationId: row.organizationId!, ...(typeof row.name === "string" ? { name: row.name } : {}) }));
     };
