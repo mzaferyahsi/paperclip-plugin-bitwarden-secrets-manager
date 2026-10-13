@@ -9,7 +9,7 @@ const config = (enabled = true) => ({
   bsmProjectIds: ["550e8400-e29b-41d4-a716-446655440003"],
   paperclipApiOrigin: "https://paperclip.example/", destinationScope: "company",
 });
-function fakeContext(companyConfigs, seeded = {}, resolveImpl = async () => "fixture-secret-value") {
+function fakeContext(companyConfigs, seeded = {}, resolveImpl = async () => "fixture-secret-value", denyConfig = []) {
   const handlers = { jobs: {}, data: {}, actions: {} };
   const state = new Map(Object.entries(seeded).map(([companyId, value]) => [`${companyId}/runtime`, value]));
   const resolved = [];
@@ -21,7 +21,10 @@ function fakeContext(companyConfigs, seeded = {}, resolveImpl = async () => "fix
       list: async () => Object.keys(companyConfigs).map((id) => ({ id })),
       get: async (id) => companyConfigs[id] ? { id } : null,
     },
-    config: { get: async (companyId) => companyConfigs[companyId] ?? {} },
+    config: { get: async (companyId) => {
+      if (denyConfig.includes(companyId)) throw new Error("InvocationScopeDeniedError: company context is required");
+      return companyConfigs[companyId] ?? {};
+    } },
     state: {
       get: async ({ scopeId, stateKey }) => state.get(`${scopeId}/${stateKey}`) ?? null,
       set: async ({ scopeId, stateKey }, value) => state.set(`${scopeId}/${stateKey}`, value),
@@ -96,4 +99,13 @@ test("status action uses host-authorized company scope and rejects agent actors"
   const result = await handlers.actions["get-status"]({}, { actor: { type: "user", userId: "user" }, companyId: "companyA" });
   assert.equal(result.status, "ready");
   assert.notEqual(result.status, state.get("companyB/runtime").status);
+});
+
+test("a company the host denies config.get for is skipped and does not abort the tick", async () => {
+  const { handlers, resolved, state } = fakeContext(
+    { unconfigured: {}, companyA: config() }, {}, undefined, ["unconfigured"]);
+  await handlers.jobs["bsm-sync"]({ jobKey: "bsm-sync", runId: "run", trigger: "schedule", scheduledAt: "2026-01-01T00:00:00.000Z" });
+  assert.equal(state.has("unconfigured/runtime"), false);
+  assert.equal(state.get("companyA/runtime").status, "success");
+  assert.equal(resolved.length, 2);
 });
