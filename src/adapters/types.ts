@@ -47,7 +47,7 @@ export interface BsmSecretSummary {
 export interface BsmSdk {
   listSecretIds(organizationId: string): Promise<readonly BsmSecretSummary[]>;
   getSecrets(ids: readonly string[]): Promise<readonly BsmSecret[]>;
-  listProjects?(organizationId: string): Promise<readonly { id: string; organizationId: string }[]>;
+  listProjects?(organizationId: string): Promise<readonly { id: string; organizationId: string; name?: string }[]>;
 }
 
 export interface BsmSnapshot {
