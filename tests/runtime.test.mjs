@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { JsonRpcCallError, PLUGIN_RPC_ERROR_CODES } from "@paperclipai/plugin-sdk";
 import { registerRuntime } from "../.test-build/runtime.js";
 
 const ref = (n) => ({ type: "secret_ref", secretId: `550e8400-e29b-41d4-a716-44665544000${n}`, version: "latest" });
@@ -9,7 +10,8 @@ const config = (enabled = true) => ({
   bsmProjectIds: ["550e8400-e29b-41d4-a716-446655440003"],
   paperclipApiOrigin: "https://paperclip.example/", destinationScope: "company",
 });
-function fakeContext(companyConfigs, seeded = {}, resolveImpl = async () => "fixture-secret-value", denyConfig = []) {
+function fakeContext(companyConfigs, seeded = {}, resolveImpl = async () => "fixture-secret-value", denyConfig = [], failConfig = []) {
+  const logged = [];
   const handlers = { jobs: {}, data: {}, actions: {} };
   const state = new Map(Object.entries(seeded).map(([companyId, value]) => [`${companyId}/runtime`, value]));
   const resolved = [];
@@ -22,7 +24,8 @@ function fakeContext(companyConfigs, seeded = {}, resolveImpl = async () => "fix
       get: async (id) => companyConfigs[id] ? { id } : null,
     },
     config: { get: async (companyId) => {
-      if (denyConfig.includes(companyId)) throw new Error("InvocationScopeDeniedError: company context is required");
+      if (denyConfig.includes(companyId)) throw new JsonRpcCallError({ code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED, message: "company context is required" });
+      if (failConfig.includes(companyId)) throw new Error("boom");
       return companyConfigs[companyId] ?? {};
     } },
     state: {
@@ -31,12 +34,13 @@ function fakeContext(companyConfigs, seeded = {}, resolveImpl = async () => "fix
     },
     secrets: { resolve: async (secretRef, options) => { resolved.push({ secretRef, options }); return resolveImpl(secretRef, options); } },
     activity: { log: async () => {} },
+    logger: { error: (message, meta) => { logged.push({ message, meta }); }, info() {}, warn() {}, debug() {} },
   };
   registerRuntime(ctx, {
     createSdk: async () => ({ listSecretIds: async () => [], getSecrets: async () => [] }),
     createTransport: () => async () => ({ status: 200, json: async () => [] }),
   });
-  return { handlers, state, resolved };
+  return { handlers, state, resolved, logged };
 }
 
 test("scheduled job enumerates companies and resolves refs with company and config path", async () => {
@@ -108,4 +112,15 @@ test("a company the host denies config.get for is skipped and does not abort the
   assert.equal(state.has("unconfigured/runtime"), false);
   assert.equal(state.get("companyA/runtime").status, "success");
   assert.equal(resolved.length, 2);
+});
+
+test("an unexpected config.get error is logged with the company id and rethrown", async () => {
+  const { handlers, logged } = fakeContext(
+    { broken: config(), companyA: config() }, {}, undefined, [], ["broken"]);
+  await assert.rejects(
+    handlers.jobs["bsm-sync"]({ jobKey: "bsm-sync", runId: "run", trigger: "schedule", scheduledAt: "2026-01-01T00:00:00.000Z" }),
+    /boom/);
+  assert.equal(logged.length, 1);
+  assert.equal(logged[0].meta.companyId, "broken");
+  assert.equal(JSON.stringify(logged).includes("fixture-secret-value"), false);
 });

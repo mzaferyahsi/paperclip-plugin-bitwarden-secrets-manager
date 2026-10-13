@@ -1,4 +1,4 @@
-import type { PluginContext, PluginJobContext } from "@paperclipai/plugin-sdk";
+import { PLUGIN_RPC_ERROR_CODES, type PluginContext, type PluginJobContext } from "@paperclipai/plugin-sdk";
 import { isSecretRef, validateConfig, type BsmConfig } from "./config.js";
 import { createAuthenticatedBitwardenSdk } from "./adapters/bitwarden.js";
 import { AdapterError, type HttpRequest, type HttpResponse, type HttpTransport } from "./adapters/types.js";
@@ -22,6 +22,8 @@ type State = {
   absenceEvidence?: SyncState["absenceEvidence"];
 };
 
+// Matched by name, not instanceof: the bundled SDK copy is not the class the host runtime throws.
+function isErrorNamed(error: unknown, name: string) { return error instanceof Error && error.name === name; }
 function stateScope(companyId: string) { return { scopeKind: "company" as const, scopeId: companyId, stateKey: STATE_KEY }; }
 function dateMillis(input: unknown): number | null {
   const n = typeof input === "string" ? Date.parse(input) : NaN;
@@ -69,7 +71,11 @@ async function syncCompanies(ctx: PluginContext, job: PluginJobContext | null, o
     // have a stored plugin config row; any other company is denied. Treat denial as "unconfigured".
     let config: BsmConfig;
     try { config = await ctx.config.get(companyId) as BsmConfig; }
-    catch { continue; }
+    catch (error) {
+      if (isErrorNamed(error, "JsonRpcCallError") && (error as { code?: unknown }).code === PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED) continue;
+      ctx.logger.error("config.get failed unexpectedly", { companyId, code: (error as { code?: unknown })?.code });
+      throw error;
+    }
     if (config.enabled !== true) continue;
     let state = (await ctx.state.get(stateScope(companyId)) ?? {}) as State;
     const currentRefs = [config.bsmAccessToken, config.paperclipApiToken].map((ref) => isSecretRef(ref) ? ref.secretId : "invalid");
