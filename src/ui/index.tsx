@@ -33,6 +33,7 @@ export function BsmSettingsPage({ context }: { context: { companyId?: string | n
   const listSecrets = usePluginAction("list-secrets");
   const saveToken = usePluginAction("save-token");
   const selectSecret = usePluginAction("select-secret");
+  const saveSettings = usePluginAction("save-settings");
   const [mode, setMode] = useState<"enter" | "select">("enter");
   const [token, setToken] = useState("");
   const [secrets, setSecrets] = useState<Secret[]>([]);
@@ -64,20 +65,22 @@ export function BsmSettingsPage({ context }: { context: { companyId?: string | n
     } catch { setMessage("setup_failed"); }
     finally { setBusy(false); }
   }
-  async function persist(kind: "enter" | "select") {
+  async function persist() {
+    const kind = mode === "enter" ? (token.trim() ? "enter" : "none") : (selectedId ? "select" : "none");
     if (!companyId) { setMessage("company_required"); return; }
     setBusy(true); setMessage("");
     try {
       const result = kind === "enter"
         ? await saveToken({ companyId, token, operationId, settings }) as { ok: boolean; errorCode?: string; secret?: { id: string }; secretId?: string }
-        : await selectSecret({ companyId, secretId: selectedId, settings }) as { ok: boolean; errorCode?: string };
+        : kind === "select" ? await selectSecret({ companyId, secretId: selectedId, settings }) as { ok: boolean; errorCode?: string }
+        : await saveSettings({ companyId, settings }) as { ok: boolean; errorCode?: string };
       if (!result.ok) {
         const failure = result as { secret?: { id?: string }; secretId?: string };
         const createdId = failure.secret?.id ?? failure.secretId;
         setMessage(`${result.errorCode ?? "setup_failed"}${createdId ? ` · saved secret ID: ${createdId}` : ""}`);
         return;
       }
-      setToken(""); setOperationId(crypto.randomUUID()); setMessage("Saved. Sync remains disabled until you enable it in settings.");
+      setToken(""); setOperationId(crypto.randomUUID()); setSelectedId(""); setMessage("Saved. Sync remains disabled until you enable it in settings.");
       const latest = await getSettings({}) as { ok: boolean; config?: Settings };
       if (latest.ok && latest.config) setSettings(latest.config);
     } catch { setMessage("setup_failed"); }
@@ -87,7 +90,7 @@ export function BsmSettingsPage({ context }: { context: { companyId?: string | n
   if (!loaded || !worker) return <div style={styles.page}>Loading settings…</div>;
   return <main style={styles.page}>
     <h1>Bitwarden Secrets Manager</h1>
-    <p>Choose how to bind the Bitwarden token. Secret values are never shown after saving.</p>
+    <p>One Save stores these settings and the machine access token (as a native encrypted secret). Sync stays disabled until you enable it.</p>
     <section style={styles.section}>
       <h2>Company sync settings</h2>
       <label style={styles.field}>Organization UUID<input style={styles.input} value={settings.bsmOrganizationId ?? ""} onChange={(e) => setField("bsmOrganizationId", e.target.value)} /></label>
@@ -99,18 +102,17 @@ export function BsmSettingsPage({ context }: { context: { companyId?: string | n
       <label style={styles.field}>Target key prefix<input style={styles.input} value={settings.targetSecretKeyPrefix ?? "bitwarden."} onChange={(e) => setField("targetSecretKeyPrefix", e.target.value)} /></label>
       <label style={styles.field}>Bitwarden region<select style={styles.input} value={settings.bitwardenRegion ?? "US"} onChange={(e) => setField("bitwardenRegion", e.target.value)}><option>US</option><option>EU</option></select></label>
       <label><input type="checkbox" checked={settings.archiveOnRemoval ?? false} onChange={(e) => setField("archiveOnRemoval", e.target.checked)} /> Allow archive after two complete missing snapshots</label>
-    </section>
-    <section style={styles.section}>
-      <h2>Bitwarden credential</h2>
+      <h3>Bitwarden machine access token</h3>
+      <p>Token configured: <strong>{settings.bsmAccessToken ? "yes" : "no"}</strong>. The value is never shown again; enter a new one to replace it.</p>
       <div role="group" aria-label="Credential method">
         <button type="button" aria-pressed={mode === "enter"} onClick={() => changeMode("enter")}>Enter token</button>{" "}
         <button type="button" aria-pressed={mode === "select"} onClick={() => changeMode("select")}>Select existing secret</button>
       </div>
-      {mode === "enter" ? <label style={styles.field}>Bitwarden machine token<input style={styles.input} type="password" autoComplete="new-password" value={token} onChange={(e) => setToken(e.target.value)} /></label> : <>
+      {mode === "enter" ? <label style={styles.field}>Machine access token<input style={styles.input} type="password" autoComplete="new-password" value={token} placeholder={settings.bsmAccessToken ? "Leave empty to keep the current token" : ""} onChange={(e) => setToken(e.target.value)} /></label> : <>
         <button type="button" disabled={busy} onClick={() => void loadSecrets()}>Load company secret metadata</button>
         <label style={styles.field}>Existing company secret<select style={styles.input} value={selectedId} onChange={(e) => setSelectedId(e.target.value)}><option value="">Select a secret</option>{secrets.map((secret) => <option key={secret.id} value={secret.id}>{secret.name} · {secret.provider} · {secret.id}</option>)}</select></label>
       </>}
-      <button type="button" disabled={busy || (mode === "enter" ? !token.trim() : !selectedId)} onClick={() => void persist(mode)}>Save credential reference</button>
+      <p><button type="button" disabled={busy} onClick={() => void persist()}>Save settings</button></p>
       {message && <p role="status">{message}</p>}
     </section>
   </main>;
