@@ -65,7 +65,11 @@ async function syncCompanies(ctx: PluginContext, job: PluginJobContext | null, o
   for (const company of selected) {
     if (Date.now() - started >= RUN_BUDGET_MS) break;
     const companyId = company.id;
-    const config = await ctx.config.get(companyId) as BsmConfig;
+    // Host 2026.1012.0 admits config.get(companyId) from a job only for companies that already
+    // have a stored plugin config row; any other company is denied. Treat denial as "unconfigured".
+    let config: BsmConfig;
+    try { config = await ctx.config.get(companyId) as BsmConfig; }
+    catch { continue; }
     if (config.enabled !== true) continue;
     let state = (await ctx.state.get(stateScope(companyId)) ?? {}) as State;
     const currentRefs = [config.bsmAccessToken, config.paperclipApiToken].map((ref) => isSecretRef(ref) ? ref.secretId : "invalid");
