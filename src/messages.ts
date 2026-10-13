@@ -1,0 +1,43 @@
+/** Plain-language text and the exact next action for every code the page can show. */
+const MESSAGES: Record<string, { message: string; action: string }> = {
+  bsm_credential_required: { message: "No Bitwarden machine access token is configured.", action: "Add the Bitwarden machine access token below and save." },
+  paperclip_credential_required: { message: "No Paperclip API token reference is bound to this plugin.", action: "Ask an instance admin to bind a Paperclip API token secret in the plugin configuration." },
+  organization_invalid: { message: "The organization UUID is missing or not a valid UUID.", action: "Enter the Bitwarden organization UUID below and save." },
+  project_allowlist_invalid: { message: "The project list is empty or contains an invalid or duplicate UUID.", action: "Enter at least one valid, unique Bitwarden project UUID below and save." },
+  paperclip_origin_invalid: { message: "The Paperclip origin must be an https:// address with no path.", action: "Enter an origin such as https://paperclip.example and save." },
+  unsupported_destination_scope: { message: "Only company destinations are supported in this version.", action: "Remove the destination scope setting or set it to company." },
+  bitwarden_region_invalid: { message: "The Bitwarden region is not US or EU.", action: "Choose US or EU below and save." },
+  sync_interval_invalid: { message: "The sync interval is not a whole number of at least 5 minutes.", action: "Enter 5 or more minutes below and save." },
+  target_key_prefix_invalid: { message: "The target key prefix is too long or has characters that are not allowed.", action: "Use letters, digits, dot, dash or underscore, and keep it short." },
+  sync_disabled: { message: "Sync is switched off.", action: "Set Enabled in the plugin configuration after the checklist is complete." },
+  configuration_required: { message: "Bitwarden or Paperclip rejected the stored credential.", action: "Replace the Bitwarden machine access token below, then press Test connection." },
+  paperclip_credential_expired_or_revoked: { message: "The Paperclip API token was rejected (expired or revoked).", action: "Ask an instance admin to replace the Paperclip API token secret, then press Sync now." },
+  paperclip_permission_denied: { message: "The Paperclip API token does not have permission to manage company secrets.", action: "Ask an instance admin to bind a token with company secret access, then press Sync now." },
+  paperclip_rate_limited: { message: "Paperclip asked the plugin to slow down.", action: "No action needed. The plugin retries automatically after the shown time." },
+  paperclip_unavailable: { message: "Paperclip could not be reached.", action: "Check the Paperclip origin and that the server is up. The plugin retries automatically." },
+  remote_unavailable: { message: "Bitwarden could not be reached or returned an error.", action: "Press Test connection. If it keeps failing, check the region and Bitwarden status." },
+  snapshot_incomplete: { message: "The Bitwarden data was incomplete, so nothing was removed or changed unsafely.", action: "Check that the token can read every listed project, then press Test connection." },
+  ownership_mismatch: { message: "A Paperclip secret with the same key or name already exists and is not owned by this plugin.", action: "Rename or remove the conflicting secret, or change the target key prefix." },
+  identity_mismatch: { message: "A returned record did not belong to this company.", action: "Contact the plugin owner. Nothing was changed." },
+  ambiguous_write: { message: "A write to Paperclip may or may not have completed.", action: "Press Sync now. The plugin reconciles on the next run." },
+  invalid_input: { message: "A configured value was rejected as invalid.", action: "Check the settings below and save." },
+  time_budget_exhausted: { message: "The run reached its time limit and stopped early.", action: "No action needed. The next run continues." },
+  clock_anchor_reset: { message: "The server clock moved backwards and the schedule was reset.", action: "No action needed." },
+  removal_scope_changed: { message: "The project or token changed, so removal checks restarted.", action: "No action needed." },
+  setup_credential_required: { message: "Saving settings needs a temporary Paperclip setup token reference.", action: "Ask an instance admin to bind paperclipSetupApiToken in the plugin configuration, save, then remove it." },
+  setup_credential_rejected: { message: "The Paperclip setup token was rejected.", action: "Ask an instance admin to replace the setup token secret." },
+  setup_permission_denied: { message: "The Paperclip setup token is not allowed to save settings.", action: "Use an instance-admin setup token." },
+  setup_identity_mismatch: { message: "The setup token belongs to a different person than you.", action: "Use a setup token that belongs to you and has instance-admin rights." },
+  native_request_failed: { message: "Paperclip rejected or failed the request.", action: "Try again. If it persists, check the Paperclip server." },
+  config_save_failed: { message: "The token was stored but the settings could not be saved.", action: "Press Select existing secret, choose the new secret by its ID, and save again." },
+  secret_not_selectable: { message: "That secret cannot be used.", action: "Choose an active secret from this company." },
+  token_required: { message: "No token was entered.", action: "Enter the machine access token." },
+  settings_invalid: { message: "Some settings are invalid.", action: "Check the organization, project, origin and interval fields." },
+  user_context_required: { message: "This action needs a signed-in user in a company.", action: "Open the page from the company, signed in." },
+  setup_failed: { message: "The request failed.", action: "Try again." },
+};
+export function describeCode(code: string | null | undefined): { code: string; message: string; action: string } | null {
+  if (!code) return null;
+  return { code, ...(MESSAGES[code] ?? { message: "An unexpected problem occurred.", action: "Try again. If it persists, contact the plugin owner." }) };
+}
+

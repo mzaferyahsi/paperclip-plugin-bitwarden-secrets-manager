@@ -115,3 +115,26 @@ test("lost secret-create response is reconciled by deterministic operation key",
   assert.equal(requests.filter((request) => request.method === "GET" && request.path.endsWith("/secrets")).length, 1);
   assert.equal(JSON.stringify(result).includes(fixtureToken), false);
 });
+
+test("save-settings keeps the existing token ref, stays disabled, and requires a token ref", async () => {
+  const bsmRef = { type: "secret_ref", secretId: "550e8400-e29b-41d4-a716-446655440016", version: "latest" };
+  const h = harness();
+  h.config[companyId] = { ...baseConfig, enabled: true, bsmAccessToken: bsmRef };
+  const result = await h.actions["save-settings"]({ companyId, settings: { ...settings, syncIntervalMinutes: 30 } }, actorContext);
+  assert.equal(result.ok, true);
+  const saved = h.requests.find((r) => r.path.endsWith("/config")).body.configJson;
+  assert.deepEqual(saved.bsmAccessToken, bsmRef);
+  assert.equal(saved.enabled, false);
+  assert.equal(saved.syncIntervalMinutes, 30);
+  const none = harness();
+  assert.deepEqual(await none.actions["save-settings"]({ companyId, settings }, actorContext), { ok: false, errorCode: "bsm_credential_required" });
+});
+
+test("replacing the token creates a new secret and switches the ref", async () => {
+  const h = harness();
+  h.config[companyId] = { ...baseConfig, bsmAccessToken: { type: "secret_ref", secretId: "550e8400-e29b-41d4-a716-446655440016" } };
+  const result = await h.actions["save-token"]({ companyId, token: fixtureToken, operationId: "550e8400-e29b-41d4-a716-446655440017", settings }, actorContext);
+  assert.equal(result.ok, true);
+  assert.equal(h.config[companyId].bsmAccessToken.secretId, "550e8400-e29b-41d4-a716-446655440015");
+  assert.equal(h.requests.some((r) => r.method === "DELETE"), false);
+});

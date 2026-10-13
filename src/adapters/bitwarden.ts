@@ -12,7 +12,7 @@ export interface BitwardenClientLike {
     }[] } | null }>;
   };
   projects?(): {
-    list(organizationId: string): Promise<{ success: boolean; errorMessage?: string | null; data?: { data: readonly { id?: string; organizationId?: string }[] } | null }>;
+    list(organizationId: string): Promise<{ success: boolean; errorMessage?: string | null; data?: { data: readonly { id?: string; organizationId?: string; name?: string }[] } | null }>;
   };
 }
 
@@ -64,7 +64,7 @@ export function bitwardenSdkAdapter(client: BitwardenClientLike): BsmSdk {
       if (!Array.isArray(result.data?.data)) throw new AdapterError("snapshot_incomplete");
       const rows = result.data.data;
       if (rows.some(row => !row.id || !row.organizationId)) throw new AdapterError("snapshot_incomplete");
-      return rows.map(row => ({ id: row.id!, organizationId: row.organizationId! }));
+      return rows.map(row => ({ id: row.id!, organizationId: row.organizationId!, ...(typeof row.name === "string" ? { name: row.name } : {}) }));
     };
   }
   return adapter;

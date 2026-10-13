@@ -57,7 +57,7 @@ async function authorizedSetup(ctx: PluginContext, companyId: string, actorUserI
 
 function errorCode(error: unknown) {
   const message = error instanceof Error ? error.message : "";
-  return ["setup_credential_required", "setup_credential_rejected", "setup_permission_denied", "setup_identity_mismatch", "paperclip_origin_invalid", "native_request_failed", "config_save_failed", "secret_not_selectable", "token_required", "settings_invalid", "operation_invalid"].includes(message) ? message : "setup_failed";
+  return ["setup_credential_required", "setup_credential_rejected", "setup_permission_denied", "setup_identity_mismatch", "paperclip_origin_invalid", "native_request_failed", "config_save_failed", "secret_not_selectable", "token_required", "bsm_credential_required", "paperclip_credential_required", "settings_invalid", "operation_invalid"].includes(message) ? message : "setup_failed";
 }
 
 export function registerSettingsActions(ctx: PluginContext) {
@@ -108,6 +108,20 @@ export function registerSettingsActions(ctx: PluginContext) {
       return { ok: true, secret: { id: newRef.secretId }, enabled: false };
     } catch (error) { return { ok: false, errorCode: errorCode(error) }; }
     finally { /* transient token is not copied into config, state, or output */ }
+  });
+
+  ctx.actions.register("save-settings", async (params, actionContext) => {
+    const companyId = userCompany(actionContext, params.companyId);
+    if (!companyId || !actionContext.actor.userId) return { ok: false, errorCode: "user_context_required" };
+    try {
+      const oldConfig = await ctx.config.get(companyId) as BsmConfig;
+      const { token, origin } = await authorizedSetup(ctx, companyId, actionContext.actor.userId, oldConfig);
+      if (!isSecretRef(oldConfig.bsmAccessToken)) return { ok: false, errorCode: "bsm_credential_required" };
+      const nextConfig = composeConfig(oldConfig, pickSettings(params.settings));
+      if (validateConfig(nextConfig, false)) return { ok: false, errorCode: "settings_invalid" };
+      await saveConfig(ctx, origin, token, companyId, nextConfig);
+      return { ok: true, enabled: false };
+    } catch (error) { return { ok: false, errorCode: errorCode(error) }; }
   });
 
   ctx.actions.register("select-secret", async (params, actionContext) => {

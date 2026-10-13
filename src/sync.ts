@@ -16,7 +16,9 @@ export type SyncState = {
   scheduledAnchor?: string; nextEligibleAt?: string; runtimeRefIds?: string[];
   processedCompanies?: number; itemJournal?: JournalItem[];
   destinationVersions?: Record<string, number>; absenceEvidence?: Record<string, { fingerprint: string; count: number }>;
+  lastDurationMs?: number; counts?: SyncCounts; projectNames?: Record<string, string>;
 };
+export type SyncCounts = { read: number; created: number; updated: number; unchanged: number; archived: number; failed: number };
 export type SyncPorts = {
   sdk: BsmSdk;
   native: PaperclipSecretsAdapter;
@@ -131,6 +133,8 @@ export async function syncCompany(config: BsmConfig, ports: SyncPorts): Promise<
     candidates.push({ source, target: existing, action });
   }
 
+  const startedAt = now();
+  const counts: SyncCounts = { read: snapshot.secrets.length, created: 0, updated: 0, unchanged: candidates.filter(c => c.action === "none").length, archived: 0, failed: snapshot.skippedCount };
   const generation = (ports.generation ?? 0) + 1;
   const state: SyncState = { ...(ports.previousState ?? {}), generation, status: "applying", errorCode: undefined,
     configFingerprint: fingerprint, removalFingerprint, itemJournal: [],
@@ -170,10 +174,12 @@ export async function syncCompany(config: BsmConfig, ports: SyncPorts): Promise<
         await ports.native.updateMetadata(target.id, displayName(source.key, source.id), providerMetadata);
       }
       item.phase = "applied";
+      if (action === "create") counts.created++; else counts.updated++;
       mutations++;
       await ports.save(state);
     } catch (error) {
       hadFailure = true;
+      counts.failed++;
       state.status = "partial";
       state.errorCode = safeErrorCode(error);
       await ports.save(state);
@@ -204,10 +210,12 @@ export async function syncCompany(config: BsmConfig, ports: SyncPorts): Promise<
           await ports.native.archive(target.id);
           item.phase = "applied";
           delete evidence[id];
+          counts.archived++;
           mutations++;
           await ports.save(state);
         } catch (error) {
           hadFailure = true;
+          counts.failed++;
           state.errorCode = safeErrorCode(error);
           await ports.save(state);
           break;
@@ -218,6 +226,8 @@ export async function syncCompany(config: BsmConfig, ports: SyncPorts): Promise<
   }
 
   state.destinationVersions = versions;
+  state.counts = counts;
+  state.lastDurationMs = Math.max(0, now() - startedAt);
   if (!configChanged || ports.absenceEvidence) state.absenceEvidence = ports.absenceEvidence;
   state.status = hadFailure || budgetExpired ? "partial" : snapshot.complete ? "success" : "partial";
   if (budgetExpired && !state.errorCode) state.errorCode = "time_budget_exhausted";
