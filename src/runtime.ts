@@ -1,4 +1,4 @@
-import type { PluginContext, PluginJobContext } from "@paperclipai/plugin-sdk";
+import { PLUGIN_RPC_ERROR_CODES, type PluginContext, type PluginJobContext } from "@paperclipai/plugin-sdk";
 import { isSecretRef, validateConfig, type BsmConfig } from "./config.js";
 import { createAuthenticatedBitwardenSdk } from "./adapters/bitwarden.js";
 import { AdapterError, type HttpRequest, type HttpResponse, type HttpTransport } from "./adapters/types.js";
@@ -22,6 +22,8 @@ type State = {
   absenceEvidence?: SyncState["absenceEvidence"];
 };
 
+// Matched by name, not instanceof: the bundled SDK copy is not the class the host runtime throws.
+function isErrorNamed(error: unknown, name: string) { return error instanceof Error && error.name === name; }
 function stateScope(companyId: string) { return { scopeKind: "company" as const, scopeId: companyId, stateKey: STATE_KEY }; }
 function dateMillis(input: unknown): number | null {
   const n = typeof input === "string" ? Date.parse(input) : NaN;
@@ -62,6 +64,9 @@ async function syncCompanies(ctx: PluginContext, job: PluginJobContext | null, o
     }
   }
   let processed = 0;
+  let denied = 0;
+  let configured = 0;
+  let enabled = 0;
   for (const company of selected) {
     if (Date.now() - started >= RUN_BUDGET_MS) break;
     const companyId = company.id;
@@ -69,8 +74,14 @@ async function syncCompanies(ctx: PluginContext, job: PluginJobContext | null, o
     // have a stored plugin config row; any other company is denied. Treat denial as "unconfigured".
     let config: BsmConfig;
     try { config = await ctx.config.get(companyId) as BsmConfig; }
-    catch { continue; }
+    catch (error) {
+      if (isErrorNamed(error, "JsonRpcCallError") && (error as { code?: unknown }).code === PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED) { denied++; continue; }
+      ctx.logger.error("config.get failed unexpectedly", { companyId, code: (error as { code?: unknown })?.code });
+      throw error;
+    }
+    configured++;
     if (config.enabled !== true) continue;
+    enabled++;
     let state = (await ctx.state.get(stateScope(companyId)) ?? {}) as State;
     const currentRefs = [config.bsmAccessToken, config.paperclipApiToken].map((ref) => isSecretRef(ref) ? ref.secretId : "invalid");
     if (state.runtimeRefIds && (state.runtimeRefIds[0] !== currentRefs[0] || state.runtimeRefIds[1] !== currentRefs[1])) {
@@ -163,7 +174,12 @@ async function syncCompanies(ctx: PluginContext, job: PluginJobContext | null, o
       await ctx.activity.log({ companyId, message: "Bitwarden sync stopped with a sanitized error.", entityType: "company", entityId: companyId, metadata: { errorCode } });
     }
   }
-  return { status: Date.now() - started >= RUN_BUDGET_MS || companyListTruncated ? "partial" : "ok", processedCompanies: processed };
+  const summary = { companies: selected.length, configured, enabled, denied, processed };
+  if (!onlyCompanyId) {
+    if (selected.length > 0 && denied === selected.length) ctx.logger.warn("scheduled sync: config.get denied for every company", summary);
+    else ctx.logger.info("scheduled sync summary", summary);
+  }
+  return { status: Date.now() - started >= RUN_BUDGET_MS || companyListTruncated ? "partial" : "ok", processedCompanies: processed, ...summary };
 }
 
 export type RuntimeDependencies = {
