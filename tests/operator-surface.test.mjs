@@ -188,12 +188,28 @@ test("Bitwarden SDK 401 and 403 messages normalize to the new codes", async () =
   }
 });
 
-test("every ERROR_CODES entry has UI copy and a retry class and severity", () => {
-  const fallback = describeCode("zz_unknown_zz").message;
+test("every ERROR_CODES entry has UI copy and a retry class and severity", async () => {
+  const ui = await import("../.test-build/ui.mjs");
   for (const [code, info] of Object.entries(ERROR_CODES)) {
-    assert.notEqual(describeCode(code).message, fallback, `missing copy for ${code}`);
+    assert.ok(ui.ERROR_COPY[code]?.title && ui.ERROR_COPY[code]?.action, `missing UI copy for ${code}`);
     assert.ok(["auto", "blocked", "none"].includes(info.retry));
     assert.ok(["error", "warning", "info"].includes(info.severity));
   }
+  assert.deepEqual(ui.copyCoverage(), []);
+  const unknown = ui.errorCopy("zz_unknown_zz");
+  assert.equal(unknown.title, "Something went wrong");
+  assert.equal(unknown.code, "zz_unknown_zz");
   for (const code of AUTHORIZATION_BLOCKED) assert.ok(ERROR_CODES[code], code);
+});
+
+test("settings state fails closed and widget exposes all required presentation states", async () => {
+  const ui = await import("../.test-build/ui.mjs");
+  assert.equal(ui.settingsViewState(false, true), "loading");
+  assert.equal(ui.settingsViewState(true, false), "locked");
+  assert.equal(ui.settingsViewState(true, true), "editable");
+  assert.equal(ui.widgetViewState("available", false).state, "loading");
+  assert.equal(ui.widgetViewState("available", true, { configured: false }).state, "not-set-up");
+  assert.equal(ui.widgetViewState("available", true, { configured: true, enabled: true, status: "success" }).state, "healthy");
+  assert.equal(ui.widgetViewState("available", true, { configured: true, enabled: true, status: "partial" }).state, "error");
+  assert.equal(ui.widgetViewState("denied", true).state, "unavailable");
 });

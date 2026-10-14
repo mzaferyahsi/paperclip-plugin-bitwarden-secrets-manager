@@ -16,6 +16,11 @@ await build({
   entryPoints: ["src/settings-actions.ts"], bundle: true, platform: "node", format: "esm",
   outfile: ".test-build/settings-actions.js", target: "node24", sourcemap: false,
 });
+await build({
+  entryPoints: ["src/ui/index.tsx"], bundle: true, platform: "node", format: "esm", jsx: "automatic",
+  outfile: ".test-build/ui.mjs", target: "node24", sourcemap: false,
+  external: ["react", "react/jsx-runtime", "@paperclipai/plugin-sdk/ui"],
+});
 for (const [entry, out] of [["src/overview.ts", "overview.js"], ["src/messages.ts", "messages.js"], ["src/error-codes.ts", "error-codes.js"], ["src/adapters/types.ts", "adapters/types.js"]]) {
   await build({
     entryPoints: [entry], bundle: true, platform: "node", format: "esm",
