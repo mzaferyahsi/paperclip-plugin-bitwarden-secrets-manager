@@ -90,8 +90,8 @@ test("a second entry point returns already_running while the first run still hol
   const { handlers, resolved } = fakeContext({ companyA: config() }, {}, async () => gate);
   const scheduled = handlers.jobs["bsm-sync"]({ jobKey: "bsm-sync", runId: "run", trigger: "manual", scheduledAt: new Date().toISOString() });
   await new Promise((resolve) => setImmediate(resolve));
-  const action = await handlers.actions.resync({}, { actor: { type: "user", userId: "user", companyId: "companyA" }, companyId: "companyA" });
-  assert.deepEqual(action, { status: "already_running" });
+  const second = await handlers.jobs["bsm-sync"]({ jobKey: "bsm-sync", runId: "run2", trigger: "manual", scheduledAt: new Date().toISOString() });
+  assert.equal(second, undefined);
   assert.equal(resolved.length, 2);
   release("credential");
   await scheduled;

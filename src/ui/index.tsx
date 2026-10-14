@@ -50,7 +50,6 @@ export function BsmSettingsPage({ context }: { context: { companyId?: string | n
   const { data: worker } = usePluginData<{ status: string }>("worker-health");
   const getOverview = usePluginAction("get-overview");
   const testConnection = usePluginAction("test-connection");
-  const resync = usePluginAction("resync");
   const [overview, setOverview] = useState<Overview | null>(null);
   const [panel, setPanel] = useState("");
   const [testResult, setTestResult] = useState<null | { ok: boolean; projectCount?: number; secretCount?: number; projects?: { id: string; name: string | null; selected: boolean }[]; note?: string | null; error?: { message: string; action: string } | null }>(null);
@@ -81,14 +80,6 @@ export function BsmSettingsPage({ context }: { context: { companyId?: string | n
     setPanel("Testing connection…"); setTestResult(null);
     try { const r = await testConnection({}) as NonNullable<typeof testResult>; setTestResult(r); setPanel(""); if (r.ok) void refresh(); }
     catch { setPanel("The connection test failed. Try again."); }
-  }
-  async function runSync() {
-    setPanel("Sync running…");
-    try {
-      const r = await resync({}) as { status?: string; errorCode?: string };
-      setPanel(r.status === "already_running" ? "A sync is already running." : r.errorCode ? (describeCode(r.errorCode)?.action ?? "Sync failed.") : "Sync finished. Details are below.");
-    } catch { setPanel("Sync failed. Try again."); }
-    void refresh();
   }
   useEffect(() => () => setToken(""), []);
   function changeMode(next: "enter" | "select") { setToken(""); setMessage(""); setMode(next); }
@@ -141,8 +132,7 @@ export function BsmSettingsPage({ context }: { context: { companyId?: string | n
         <li>Result: {overview?.lastSync.result}</li>
         <li>Counts: {overview?.lastSync.counts ? `read ${overview.lastSync.counts.read}, created ${overview.lastSync.counts.created}, updated ${overview.lastSync.counts.updated}, unchanged ${overview.lastSync.counts.unchanged}, archived ${overview.lastSync.counts.archived}, failed ${overview.lastSync.counts.failed}` : "no sync yet"}</li>
         <li>Next scheduled run: {overview?.nextRunAt ? when(overview.nextRunAt) : "not scheduled"}</li></ul>
-      <p><button type="button" onClick={() => void runTest()}>Test connection</button>{" "}
-        <button type="button" onClick={() => void runSync()}>Sync now</button></p>
+      <p><button type="button" onClick={() => void runTest()}>Test connection</button></p>
       {panel && <p role="status">{panel}</p>}
       {testResult && (testResult.ok
         ? <div role="status"><p>Connection works. This token can see {testResult.projectCount} project(s) and {testResult.secretCount} secret(s).</p>

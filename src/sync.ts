@@ -14,11 +14,16 @@ export type SyncState = {
   generation: number; status: string; errorCode?: string; warningCode?: string;
   lastAttemptAt?: string; lastSuccessAt?: string; configFingerprint?: string; removalFingerprint?: string;
   scheduledAnchor?: string; nextEligibleAt?: string; runtimeRefIds?: string[];
-  processedCompanies?: number; itemJournal?: JournalItem[];
+  itemJournal?: JournalItem[];
   destinationVersions?: Record<string, number>; absenceEvidence?: Record<string, { fingerprint: string; count: number }>;
-  lastDurationMs?: number; counts?: SyncCounts; projectNames?: Record<string, string>;
+  lastDurationMs?: number; counts?: SyncCounts; lastRunSummary?: RunSummary; projectNames?: Record<string, string>;
 };
 export type SyncCounts = { read: number; created: number; updated: number; unchanged: number; archived: number; failed: number };
+/** Integers only: no names, keys or IDs (ADR-BSM-002 §3). */
+export type RunSummary = {
+  sourceCount: number; created: number; rotated: number; nativeDriftCorrected: number; metadataUpdated: number;
+  unchanged: number; archived: number; skippedArchived: number; failed: number;
+};
 export type SyncPorts = {
   sdk: BsmSdk;
   native: PaperclipSecretsAdapter;
@@ -105,7 +110,8 @@ export async function syncCompany(config: BsmConfig, ports: SyncPorts): Promise<
   const pendingJournal = new Map((ports.previousState?.itemJournal ?? [])
     .filter(item => item.phase === "planned").map(item => [item.sourceId, item]));
   const keyOwners = new Map<string, string>();
-  const candidates: Array<{ source: (typeof snapshot.secrets)[number]; target?: NativeSecret; action: "create" | "rotate" | "metadata" | "none" }> = [];
+  let skippedArchived = 0;
+  const candidates: Array<{ source: (typeof snapshot.secrets)[number]; target?: NativeSecret; action: "create" | "rotate" | "metadata" | "none"; drift?: boolean }> = [];
   for (const source of snapshot.secrets) {
     const key = destinationKey(config, orgId, source.id);
     const name = displayName(source.key, source.id);
@@ -118,10 +124,11 @@ export async function syncCompany(config: BsmConfig, ports: SyncPorts): Promise<
     if (priorKeyOwner && priorKeyOwner !== source.id) throw new AdapterError("snapshot_incomplete");
     keyOwners.set(key, source.id);
     if (!existing) { candidates.push({ source, action: "create" }); continue; }
-    if (existing.status !== "active") { candidates.push({ source, target: existing, action: "none" }); continue; }
+    if (existing.status !== "active") { skippedArchived++; candidates.push({ source, target: existing, action: "none" }); continue; }
     const metadata = existing.providerMetadata as Partial<SecretOwnership> | undefined;
-    let action: "rotate" | "metadata" | "none" = metadata?.sourceRevision !== source.revisionDate ||
-      (existing.latestVersion !== undefined && ports.destinationVersions?.[source.id] !== undefined && existing.latestVersion !== ports.destinationVersions[source.id])
+    const revisionChanged = metadata?.sourceRevision !== source.revisionDate;
+    const versionDrift = existing.latestVersion !== undefined && ports.destinationVersions?.[source.id] !== undefined && existing.latestVersion !== ports.destinationVersions[source.id];
+    let action: "rotate" | "metadata" | "none" = revisionChanged || versionDrift
       ? "rotate" : metadata?.bsmProjectId !== source.projectId || existing.name !== displayName(source.key, source.id) ? "metadata" : "none";
     const pending = pendingJournal.get(source.id);
     const priorVersion = pending?.responseVersion ?? pending?.priorVersion;
@@ -130,11 +137,13 @@ export async function syncCompany(config: BsmConfig, ports: SyncPorts): Promise<
       // native version proves the value write landed; finish metadata without replay.
       action = "metadata";
     }
-    candidates.push({ source, target: existing, action });
+    candidates.push({ source, target: existing, action, drift: action === "rotate" && !revisionChanged });
   }
 
   const startedAt = now();
   const counts: SyncCounts = { read: snapshot.secrets.length, created: 0, updated: 0, unchanged: candidates.filter(c => c.action === "none").length, archived: 0, failed: snapshot.skippedCount };
+  const summary: RunSummary = { sourceCount: snapshot.secrets.length, created: 0, rotated: 0, nativeDriftCorrected: 0, metadataUpdated: 0,
+    unchanged: candidates.filter(c => c.action === "none" && c.target?.status === "active").length, archived: 0, skippedArchived, failed: snapshot.skippedCount };
   const generation = (ports.generation ?? 0) + 1;
   const state: SyncState = { ...(ports.previousState ?? {}), generation, status: "applying", errorCode: undefined,
     configFingerprint: fingerprint, removalFingerprint, itemJournal: [],
@@ -147,7 +156,7 @@ export async function syncCompany(config: BsmConfig, ports: SyncPorts): Promise<
   let budgetExpired = ports.deadlineAt !== undefined && now() >= ports.deadlineAt;
   for (const candidate of candidates) {
     if (ports.deadlineAt !== undefined && now() >= ports.deadlineAt) { budgetExpired = true; break; }
-    const { source, target, action } = candidate;
+    const { source, target, action, drift } = candidate;
     if (action === "none") continue;
     const item: JournalItem = { sourceId: source.id, action, sourceRevision: source.revisionDate,
       ...(target ? { destinationId: target.id } : {}), ...(target?.latestVersion ? { priorVersion: target.latestVersion } : {}), phase: "planned" };
@@ -174,12 +183,13 @@ export async function syncCompany(config: BsmConfig, ports: SyncPorts): Promise<
         await ports.native.updateMetadata(target.id, displayName(source.key, source.id), providerMetadata);
       }
       item.phase = "applied";
-      if (action === "create") counts.created++; else counts.updated++;
+      if (action === "create") { counts.created++; summary.created++; }
+      else { counts.updated++; if (action === "metadata") summary.metadataUpdated++; else if (drift) summary.nativeDriftCorrected++; else summary.rotated++; }
       mutations++;
       await ports.save(state);
     } catch (error) {
       hadFailure = true;
-      counts.failed++;
+      counts.failed++; summary.failed++;
       state.status = "partial";
       state.errorCode = safeErrorCode(error);
       await ports.save(state);
@@ -210,12 +220,12 @@ export async function syncCompany(config: BsmConfig, ports: SyncPorts): Promise<
           await ports.native.archive(target.id);
           item.phase = "applied";
           delete evidence[id];
-          counts.archived++;
+          counts.archived++; summary.archived++;
           mutations++;
           await ports.save(state);
         } catch (error) {
           hadFailure = true;
-          counts.failed++;
+          counts.failed++; summary.failed++;
           state.errorCode = safeErrorCode(error);
           await ports.save(state);
           break;
@@ -227,6 +237,10 @@ export async function syncCompany(config: BsmConfig, ports: SyncPorts): Promise<
 
   state.destinationVersions = versions;
   state.counts = counts;
+  state.lastRunSummary = summary;
+  // Reappeared archived sources are never reactivated; the warning clears once none remain.
+  if (skippedArchived > 0) state.warningCode = "archived_source_reappeared";
+  else if (state.warningCode === "archived_source_reappeared") state.warningCode = undefined;
   state.lastDurationMs = Math.max(0, now() - startedAt);
   if (!configChanged || ports.absenceEvidence) state.absenceEvidence = ports.absenceEvidence;
   state.status = hadFailure || budgetExpired ? "partial" : snapshot.complete ? "success" : "partial";

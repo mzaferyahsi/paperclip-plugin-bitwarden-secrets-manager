@@ -121,3 +121,37 @@ test("a namespace change establishes a new removal baseline and never silently a
   assert.equal(h.secrets.get(target.id)?.status, "active");
   assert.equal(h.state?.warningCode, "removal_scope_changed");
 });
+
+test("lastRunSummary counts created, rotated and drift as integers with no names or IDs", async () => {
+  const h = harness();
+  const first = await h.execute(item);
+  assert.deepEqual(first.lastRunSummary, { sourceCount: 1, created: 1, rotated: 0, nativeDriftCorrected: 0, metadataUpdated: 0, unchanged: 0, archived: 0, skippedArchived: 0, failed: 0 });
+  const rotated = await h.execute({ ...item, revisionDate: "2026-10-11T00:00:00Z" }, true, h.state);
+  assert.equal(rotated.lastRunSummary?.rotated, 1);
+  const native = [...h.secrets.values()][0]!;
+  native.latestVersion = (native.latestVersion ?? 0) + 1; // changed outside the plugin
+  const drift = await h.execute({ ...item, revisionDate: "2026-10-11T00:00:00Z" }, true, h.state);
+  assert.equal(drift.lastRunSummary?.nativeDriftCorrected, 1);
+  assert.equal(drift.lastRunSummary?.rotated, 0);
+  const steady = await h.execute({ ...item, revisionDate: "2026-10-11T00:00:00Z" }, true, h.state);
+  assert.equal(steady.lastRunSummary?.unchanged, 1);
+  const text = JSON.stringify(steady.lastRunSummary);
+  assert.equal(text.includes(item.id) || text.includes("API_KEY"), false);
+});
+
+test("a reappeared archived source is counted, warned and never reactivated", async () => {
+  const metadata = { source: "bitwarden_secrets_manager", syncOwner: "mzaferyahsi.bitwarden-secrets-manager-sync",
+    bsmOrganizationId: org, bsmSecretId: item.id, bsmProjectId: project, sourceRevision: item.revisionDate, identityVersion: 1 };
+  const target: NativeSecret = { id: "native-archived", companyId: "company-1", name: `API_KEY (${item.id})`, key: `bitwarden.${org}.${item.id}`,
+    status: "archived", latestVersion: 1, providerMetadata: metadata };
+  const h = harness([target]);
+  const result = await h.execute(item);
+  assert.equal(result.lastRunSummary?.skippedArchived, 1);
+  assert.equal(result.lastRunSummary?.unchanged, 0);
+  assert.equal(result.warningCode, "archived_source_reappeared");
+  assert.equal(h.secrets.get(target.id)?.status, "archived");
+  assert.equal(h.requests.some(req => req.method !== "GET"), false);
+  h.secrets.delete(target.id);
+  const cleared = await h.execute(item, true, h.state);
+  assert.equal(cleared.warningCode, undefined);
+});

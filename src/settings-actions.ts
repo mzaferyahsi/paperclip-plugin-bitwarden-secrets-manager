@@ -3,6 +3,11 @@ import { isSecretRef, PLUGIN_ID, publicConfig, validateConfig, type BsmConfig, t
 
 type ActorContext = { actor: { type: string; userId: string | null }; companyId: string | null };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const CODE_FIELD: Record<string, string> = {
+  organization_invalid: "bsmOrganizationId", project_allowlist_invalid: "bsmProjectIds", paperclip_origin_invalid: "paperclipApiOrigin",
+  unsupported_destination_scope: "destinationScope", sync_interval_invalid: "syncIntervalMinutes",
+  target_key_prefix_invalid: "targetSecretKeyPrefix", bitwarden_region_invalid: "bitwardenRegion",
+};
 const SAFE_FIELDS = ["bsmOrganizationId", "bsmProjectIds", "paperclipApiOrigin", "destinationScope", "syncIntervalMinutes", "targetSecretKeyPrefix", "archiveOnRemoval", "bitwardenRegion"];
 
 function userCompany(context: ActorContext, requested?: unknown): string | null {
@@ -55,6 +60,13 @@ async function authorizedSetup(ctx: PluginContext, companyId: string, actorUserI
   return { token, origin };
 }
 
+/** The runtime ref is what the origin receives credentials for; once bound, the page cannot repoint it (security-review S2b). */
+function originChangeRefused(existing: BsmConfig, settings: Record<string, unknown>): boolean {
+  return isSecretRef(existing.paperclipApiToken) && Object.hasOwn(settings, "paperclipApiOrigin") && settings.paperclipApiOrigin !== existing.paperclipApiOrigin;
+}
+
+function rejection(code: string) { return { ok: false, errorCode: code, field: CODE_FIELD[code] ?? null }; }
+
 function errorCode(error: unknown) {
   const message = error instanceof Error ? error.message : "";
   return ["setup_credential_required", "setup_credential_rejected", "setup_permission_denied", "setup_identity_mismatch", "paperclip_origin_invalid", "native_request_failed", "config_save_failed", "secret_not_selectable", "token_required", "bsm_credential_required", "paperclip_credential_required", "settings_invalid", "operation_invalid"].includes(message) ? message : "setup_failed";
@@ -94,6 +106,7 @@ export function registerSettingsActions(ctx: PluginContext) {
       const oldConfig = await ctx.config.get(companyId) as BsmConfig;
       const { token, origin } = await authorizedSetup(ctx, companyId, actionContext.actor.userId, oldConfig);
       const settings = pickSettings(params.settings);
+      if (originChangeRefused(oldConfig, settings)) return { ok: false, errorCode: "paperclip_origin_invalid" };
       if (!isSecretRef(oldConfig.paperclipApiToken)) return { ok: false, errorCode: "paperclip_credential_required" };
       const draft = composeConfig(oldConfig, settings, isSecretRef(oldConfig.bsmAccessToken) ? oldConfig.bsmAccessToken : undefined);
       const candidate = { ...draft, bsmAccessToken: draft.bsmAccessToken ?? { type: "secret_ref" as const, secretId: "550e8400-e29b-41d4-a716-446655440000" } };
@@ -112,16 +125,39 @@ export function registerSettingsActions(ctx: PluginContext) {
 
   ctx.actions.register("save-settings", async (params, actionContext) => {
     const companyId = userCompany(actionContext, params.companyId);
-    if (!companyId || !actionContext.actor.userId) return { ok: false, errorCode: "user_context_required" };
+    if (!companyId || !actionContext.actor.userId) return rejection("user_context_required");
     try {
       const oldConfig = await ctx.config.get(companyId) as BsmConfig;
       const { token, origin } = await authorizedSetup(ctx, companyId, actionContext.actor.userId, oldConfig);
-      if (!isSecretRef(oldConfig.bsmAccessToken)) return { ok: false, errorCode: "bsm_credential_required" };
-      const nextConfig = composeConfig(oldConfig, pickSettings(params.settings));
-      if (validateConfig(nextConfig, false)) return { ok: false, errorCode: "settings_invalid" };
+      if (!isSecretRef(oldConfig.bsmAccessToken)) return rejection("bsm_credential_required");
+      const settings = pickSettings(params.settings);
+      if (originChangeRefused(oldConfig, settings)) return rejection("paperclip_origin_invalid");
+      const nextConfig = composeConfig(oldConfig, settings);
+      const invalid = validateConfig(nextConfig, false);
+      if (invalid) return rejection(CODE_FIELD[invalid] ? invalid : "settings_invalid");
       await saveConfig(ctx, origin, token, companyId, nextConfig);
-      return { ok: true, enabled: false };
-    } catch (error) { return { ok: false, errorCode: errorCode(error) }; }
+      return { ok: true, errorCode: null, field: null, enabled: false };
+    } catch (error) { return rejection(errorCode(error)); }
+  });
+
+  ctx.actions.register("set-enabled", async (params, actionContext) => {
+    const companyId = userCompany(actionContext, params.companyId);
+    if (!companyId || !actionContext.actor.userId) return rejection("user_context_required");
+    if (typeof params.enabled !== "boolean") return rejection("settings_invalid");
+    try {
+      const oldConfig = await ctx.config.get(companyId) as BsmConfig;
+      const { token, origin } = await authorizedSetup(ctx, companyId, actionContext.actor.userId, oldConfig);
+      if (params.enabled) {
+        const invalid = validateConfig(oldConfig, false);
+        if (invalid) return rejection(invalid);
+        if (!isSecretRef(oldConfig.bsmAccessToken)) return rejection("bsm_credential_required");
+        if (!isSecretRef(oldConfig.paperclipApiToken)) return rejection("paperclip_credential_required");
+      }
+      const nextConfig = composeConfig(oldConfig, {});
+      nextConfig.enabled = params.enabled;
+      await saveConfig(ctx, origin, token, companyId, nextConfig);
+      return { ok: true, errorCode: null, field: null, enabled: params.enabled };
+    } catch (error) { return rejection(errorCode(error)); }
   });
 
   ctx.actions.register("select-secret", async (params, actionContext) => {
@@ -132,10 +168,11 @@ export function registerSettingsActions(ctx: PluginContext) {
     try {
       const oldConfig = await ctx.config.get(companyId) as BsmConfig;
       const { token, origin } = await authorizedSetup(ctx, companyId, actionContext.actor.userId, oldConfig);
+      const settings = pickSettings(params.settings);
+      if (originChangeRefused(oldConfig, settings)) return { ok: false, errorCode: "paperclip_origin_invalid" };
       const rows = itemsOf(await request(ctx, origin, token, `/api/companies/${encodeURIComponent(companyId)}/secrets`));
       const selected = rows.find((x) => x.id === selectedId && x.companyId === companyId && x.status === "active");
       if (!selected) return { ok: false, errorCode: "secret_not_selectable" };
-      const settings = pickSettings(params.settings);
       const version: number | "latest" = params.version === undefined || params.version === "latest" ? "latest" : Number(params.version);
       if (version !== "latest" && (!Number.isInteger(version) || version < 1)) return { ok: false, errorCode: "secret_not_selectable" };
       const nextConfig = composeConfig(oldConfig, settings, { type: "secret_ref", secretId: selectedId, version });
@@ -197,6 +234,7 @@ async function saveConfig(ctx: PluginContext, origin: string, setupToken: string
       method: "POST", body: JSON.stringify({ companyId, configJson: config }),
     });
     const saved = await ctx.config.get(companyId) as BsmConfig;
-    if (!isSecretRef(saved.bsmAccessToken) || saved.bsmAccessToken.secretId !== (config.bsmAccessToken as { secretId: string }).secretId) throw new Error("config_save_failed");
+    const expected = isSecretRef(config.bsmAccessToken) ? config.bsmAccessToken.secretId : null;
+    if (saved.enabled !== config.enabled || (expected !== null && (!isSecretRef(saved.bsmAccessToken) || saved.bsmAccessToken.secretId !== expected))) throw new Error("config_save_failed");
   } catch { throw new Error("config_save_failed"); }
 }

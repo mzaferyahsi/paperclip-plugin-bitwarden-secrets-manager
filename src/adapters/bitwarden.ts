@@ -34,8 +34,8 @@ async function sdkRows<R>(call: () => Promise<any>): Promise<readonly R[] | unde
 
 function normalizeSdkFailure(message?: string | null): AdapterError {
   const text = message ?? "";
-  if (/\b401\b|unauthori[sz]ed|invalid.{0,20}token/i.test(text)) return new AdapterError("configuration_required");
-  if (/\b403\b|forbidden|permission denied/i.test(text)) return new AdapterError("configuration_required");
+  if (/\b401\b|unauthori[sz]ed|invalid.{0,20}token/i.test(text)) return new AdapterError("bsm_credential_rejected");
+  if (/\b403\b|forbidden|permission denied/i.test(text)) return new AdapterError("bsm_permission_denied");
   if (/\b429\b|too many requests|rate limit/i.test(text)) return new AdapterError("remote_unavailable", true);
   return new AdapterError("remote_unavailable", true);
 }

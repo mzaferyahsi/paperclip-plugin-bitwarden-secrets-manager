@@ -166,5 +166,5 @@ test("accepts the unwrapped shape of the shipped SDK and maps thrown failures", 
   } as any);
   assert.deepEqual(await sdk.listSecretIds("o1"), [{ id: "s1", organizationId: "o1" }]);
   assert.deepEqual(await sdk.listProjects!("o1"), [{ id: "p1", organizationId: "o1", name: "Staging" }]);
-  await assert.rejects(() => sdk.getSecrets(["s1"]), (e: any) => e.code === "configuration_required" || e.message === "configuration_required");
+  await assert.rejects(() => sdk.getSecrets(["s1"]), (e: any) => e.code === "bsm_credential_rejected");
 });

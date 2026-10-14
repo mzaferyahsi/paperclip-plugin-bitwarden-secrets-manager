@@ -5,6 +5,8 @@ export type AdapterErrorCode =
   | "paperclip_permission_denied"
   | "paperclip_rate_limited"
   | "paperclip_unavailable"
+  | "bsm_credential_rejected"
+  | "bsm_permission_denied"
   | "remote_unavailable"
   | "snapshot_incomplete"
   | "identity_mismatch"

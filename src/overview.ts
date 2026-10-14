@@ -4,6 +4,7 @@ import { createAuthenticatedBitwardenSdk } from "./adapters/bitwarden.js";
 import type { BsmSdk } from "./adapters/types.js";
 import type { SyncCounts } from "./sync.js";
 import { describeCode } from "./messages.js";
+import { AUTHORIZATION_BLOCKED } from "./error-codes.js";
 
 type ActorContext = { actor: { type: string; userId: string | null }; companyId: string | null };
 type StoredState = {
@@ -33,7 +34,7 @@ export function buildOverview(config: BsmConfig, state: StoredState, nowMs = Dat
     .map((id) => ({ id, name: state.projectNames?.[id] ?? null })) : [];
   const interval = Math.max(5, Number(config.syncIntervalMinutes ?? 15));
   const cooldownMs = millis(state.nextEligibleAt);
-  const blockingCodes = ["paperclip_credential_expired_or_revoked", "paperclip_permission_denied", "configuration_required"];
+  const blockingCodes = [...AUTHORIZATION_BLOCKED];
 
   let status: "disabled" | "setup_needed" | "blocked" | "error" | "waiting" | "ok";
   let reasonCode: string | null = null;

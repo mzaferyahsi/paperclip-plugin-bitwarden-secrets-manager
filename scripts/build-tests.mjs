@@ -16,7 +16,7 @@ await build({
   entryPoints: ["src/settings-actions.ts"], bundle: true, platform: "node", format: "esm",
   outfile: ".test-build/settings-actions.js", target: "node24", sourcemap: false,
 });
-for (const [entry, out] of [["src/overview.ts", "overview.js"], ["src/messages.ts", "messages.js"], ["src/adapters/types.ts", "adapters/types.js"]]) {
+for (const [entry, out] of [["src/overview.ts", "overview.js"], ["src/messages.ts", "messages.js"], ["src/error-codes.ts", "error-codes.js"], ["src/adapters/types.ts", "adapters/types.js"]]) {
   await build({
     entryPoints: [entry], bundle: true, platform: "node", format: "esm",
     outfile: `.test-build/${out}`, target: "node24", sourcemap: false,
