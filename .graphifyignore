@@ -1,0 +1,28 @@
+# Environment and secret files
+.env
+.env.*
+**/.env
+**/.env.*
+**/*credentials*
+**/*secret*.json
+**/*secret*.yaml
+**/*secret*.yml
+
+# Private keys, certificates, and bundles
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.crt
+**/*.cer
+**/id_rsa*
+**/id_ed25519*
+
+# Cluster credentials
+**/*kubeconfig*
+**/.kube/**
+
+# Generated and vendored content
+**/node_modules/**
+**/dist/**
+graphify-out/**
