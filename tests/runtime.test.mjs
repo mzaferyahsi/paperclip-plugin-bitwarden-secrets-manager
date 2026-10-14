@@ -12,6 +12,8 @@ const config = (enabled = true) => ({
 });
 function fakeContext(companyConfigs, seeded = {}, resolveImpl = async () => "fixture-secret-value", denyConfig = [], failConfig = []) {
   const logged = [];
+  const infos = [];
+  const warns = [];
   const handlers = { jobs: {}, data: {}, actions: {} };
   const state = new Map(Object.entries(seeded).map(([companyId, value]) => [`${companyId}/runtime`, value]));
   const resolved = [];
@@ -34,13 +36,13 @@ function fakeContext(companyConfigs, seeded = {}, resolveImpl = async () => "fix
     },
     secrets: { resolve: async (secretRef, options) => { resolved.push({ secretRef, options }); return resolveImpl(secretRef, options); } },
     activity: { log: async () => {} },
-    logger: { error: (message, meta) => { logged.push({ message, meta }); }, info() {}, warn() {}, debug() {} },
+    logger: { error: (message, meta) => { logged.push({ message, meta }); }, info: (message, meta) => { infos.push({ message, meta }); }, warn: (message, meta) => { warns.push({ message, meta }); }, debug() {} },
   };
   registerRuntime(ctx, {
     createSdk: async () => ({ listSecretIds: async () => [], getSecrets: async () => [] }),
     createTransport: () => async () => ({ status: 200, json: async () => [] }),
   });
-  return { handlers, state, resolved, logged };
+  return { handlers, state, resolved, logged, infos, warns };
 }
 
 test("scheduled job enumerates companies and resolves refs with company and config path", async () => {
@@ -123,4 +125,20 @@ test("an unexpected config.get error is logged with the company id and rethrown"
   assert.equal(logged.length, 1);
   assert.equal(logged[0].meta.companyId, "broken");
   assert.equal(JSON.stringify(logged).includes("fixture-secret-value"), false);
+});
+
+test("a configured company is processed while an unconfigured company is denied in the same tick", async () => {
+  const { handlers, state, infos } = fakeContext({ companyA: config(), companyB: {} }, {}, undefined, ["companyB"]);
+  await handlers.jobs["bsm-sync"]({ jobKey: "bsm-sync", runId: "run", trigger: "schedule", scheduledAt: "2026-01-01T00:00:00.000Z" });
+  assert.equal(state.get("companyA/runtime").status, "success");
+  assert.equal(state.has("companyB/runtime"), false);
+  assert.deepEqual(infos.at(-1).meta, { companies: 2, configured: 1, enabled: 1, denied: 1, processed: 1 });
+});
+
+test("a tick where the host denies config.get for every company logs a warning instead of a plain summary", async () => {
+  const { handlers, warns, infos } = fakeContext({ companyA: config(), companyB: config() }, {}, undefined, ["companyA", "companyB"]);
+  await handlers.jobs["bsm-sync"]({ jobKey: "bsm-sync", runId: "run", trigger: "schedule", scheduledAt: "2026-01-01T00:00:00.000Z" });
+  assert.equal(warns.length, 1);
+  assert.equal(warns[0].meta.denied, 2);
+  assert.equal(infos.length, 0);
 });
