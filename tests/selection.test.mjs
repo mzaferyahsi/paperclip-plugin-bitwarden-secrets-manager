@@ -289,3 +289,57 @@ test("UI selection helpers are case-insensitive and mode switch is lossless", ()
   assert.deepEqual(ui.toggleSecret(e, U.toLowerCase(), S.toLowerCase())[0].secretIds, []);
   assert.deepEqual(ui.excludeProject(e, U.toLowerCase()), []);
 });
+
+// ---- Manual secret-ID selection (ALR-1545) ----
+test("manual secret IDs: add, remove, case, duplicate, invalid and empty feedback", () => {
+  const U = "550E8400-E29B-41D4-A716-446655440021", S = "550E8400-E29B-41D4-A716-446655440031";
+  let e = ui.includeProject([], U, "selected");
+  assert.deepEqual(e, [{ projectId: U.toLowerCase(), mode: "selected", secretIds: [] }], "new project starts in selected mode, empty");
+  assert.equal(ui.selectionValid(e), false, "empty selected state is not saveable");
+  assert.equal(ui.checkSecretId(e, U, ""), "empty");
+  assert.equal(ui.checkSecretId(e, U, "   "), "empty");
+  assert.equal(ui.checkSecretId(e, U, "not-a-uuid"), "invalid");
+  assert.equal(ui.checkSecretId(e, U, S), "ok");
+  assert.deepEqual(ui.addSecret(e, U, "bad"), e, "invalid add is a no-op");
+  e = ui.addSecret(e, U, ` ${S} `);
+  assert.deepEqual(e[0].secretIds, [S.toLowerCase()], "trimmed and stored lowercase");
+  assert.equal(ui.checkSecretId(e, U.toLowerCase(), S.toLowerCase()), "duplicate", "case variants are duplicates");
+  assert.equal(ui.addSecret(e, U, S.toLowerCase())[0].secretIds.length, 1);
+  assert.equal(ui.selectionValid(e), true);
+  assert.equal(ui.selectionValid(ui.removeSecret(e, U.toLowerCase(), S)), false, "removing the last one makes it unsaveable");
+  assert.deepEqual(ui.addSecret([{ projectId: U.toLowerCase(), mode: "all" }], U, S), [{ projectId: U.toLowerCase(), mode: "all" }], "no add in whole-project mode");
+});
+
+test("manual secret IDs: mode switch is lossless and the saved form reloads unchanged", () => {
+  const sel = [{ projectId: P1, mode: "selected", secretIds: [S1, S2] }, { projectId: P2, mode: "all" }];
+  const { entries, legacy } = ui.selectionsFromConfig({ bsmProjectSelections: sel });
+  assert.deepEqual(entries, sel); assert.equal(legacy, false);
+  const asAll = ui.setProjectMode(entries, P1, "all");
+  assert.deepEqual(asAll[0], { projectId: P1, mode: "all" });
+  assert.deepEqual(ui.setProjectMode(asAll, P1, "selected", [S1, S2])[0].secretIds, [S1, S2]);
+  assert.deepEqual(ui.selectionsFromConfig({ bsmProjectIds: [P1] }).entries, [{ projectId: P1, mode: "all" }], "legacy stays whole-project; no implicit migration to selected");
+});
+
+test("manual secret IDs: editor renders labels, feedback and honest membership wording", async () => {
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const React = (await import("react")).default;
+  const entries = [{ projectId: P1, mode: "selected", secretIds: [S1] }, { projectId: P2, mode: "selected", secretIds: [] }];
+  const html = (i) => renderToStaticMarkup(React.createElement(ui.SecretIdEditor, { entry: entries[i], entries, name: "Prod", onChange() {} }));
+  const filled = html(0), empty = html(1);
+  assert.match(filled, /Add a secret by UUID/);
+  assert.match(filled, new RegExp(`aria-label="Remove secret ${S1} from Prod"`));
+  assert.match(filled, /aria-label="Secrets selected in Prod"/);
+  assert.match(filled, /not checked against the project when you save/);
+  assert.match(filled, /skips any that is not in this project/);
+  assert.match(empty, /No secrets chosen for Prod\. Add at least one secret UUID before saving\./);
+  assert.doesNotMatch(filled + empty, /Reload secret|Load secret names|Find secrets|verified in this project/i, "no unsupported discovery controls");
+  assert.match(filled, /<button[^>]*disabled=""[^>]*>Add secret<\/button>/, "Add is disabled while the field is empty");
+});
+
+test("UI copy: whole-project limitation and unsupported discovery are stated honestly", () => {
+  const e = ui.errorCopy("project_membership_unavailable");
+  assert.match(e.title, /not available/i);
+  assert.match(e.action, /nothing was read/i);
+  assert.doesNotMatch(ui.errorCopy("secret_selection_invalid").action, /reload|tick/i);
+  assert.deepEqual(ui.copyCoverage(), []);
+});

@@ -38,7 +38,7 @@ export const ERROR_COPY: Record<string, Copy> = {
   project_allowlist_invalid: { title: "A project ID is not valid", action: "Enter one project UUID per line." },
   project_selection_invalid: { title: "The project selection is not valid", action: "Choose at least one project, and at least one secret for each selected-secrets project." },
   project_selection_conflict: { title: "Two project lists are set", action: "Save the selection again from this page. It replaces the old list." },
-  secret_selection_invalid: { title: "A selected secret is not in its project", action: "Reload the secret list for that project and tick the secrets again." },
+  secret_selection_invalid: { title: "A selected secret was not found", action: "Check each secret UUID you entered for this organization, remove or correct the wrong ones and save." },
   project_membership_unavailable: { title: "Whole-project sync is not available", action: "Bitwarden reports a secret's project only with its value, so nothing was read. Choose specific secrets instead." },
   selection_unverified: { title: "The selection could not be checked", action: "Nothing was saved. Press Test connection, then save again." },
   sync_interval_invalid: { title: "The interval is not allowed", action: "Choose a value of at least 5 minutes." },
@@ -96,8 +96,10 @@ export function selectionValid(entries: readonly SelectionEntry[]): boolean {
   });
 }
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
-export function includeProject(entries: readonly SelectionEntry[], projectId: string): SelectionEntry[] {
-  return entries.some((e) => same(e.projectId, projectId)) ? [...entries] : [...entries, { projectId: projectId.toLowerCase(), mode: "all" }];
+export function includeProject(entries: readonly SelectionEntry[], projectId: string, mode: "all" | "selected" = "all"): SelectionEntry[] {
+  if (entries.some((e) => same(e.projectId, projectId))) return [...entries];
+  const projectKey = projectId.toLowerCase();
+  return [...entries, mode === "all" ? { projectId: projectKey, mode } : { projectId: projectKey, mode, secretIds: [] }];
 }
 export function excludeProject(entries: readonly SelectionEntry[], projectId: string): SelectionEntry[] { return entries.filter((e) => !same(e.projectId, projectId)); }
 export function setProjectMode(entries: readonly SelectionEntry[], projectId: string, mode: "all" | "selected", restoreIds: readonly string[] = []): SelectionEntry[] {
@@ -106,6 +108,42 @@ export function setProjectMode(entries: readonly SelectionEntry[], projectId: st
 export function toggleSecret(entries: readonly SelectionEntry[], projectId: string, secretId: string): SelectionEntry[] {
   return entries.map((e) => !same(e.projectId, projectId) || e.mode !== "selected" ? e :
     { ...e, secretIds: e.secretIds.some((id) => same(id, secretId)) ? e.secretIds.filter((id) => !same(id, secretId)) : [...e.secretIds, secretId.toLowerCase()] });
+}
+/** Manual secret IDs are operator-provided. Membership of the project is not checked here; sync-time validation is authoritative. */
+export type SecretIdCheck = "empty" | "invalid" | "duplicate" | "ok";
+export function checkSecretId(entries: readonly SelectionEntry[], projectId: string, raw: string): SecretIdCheck {
+  const id = raw.trim();
+  if (!id) return "empty";
+  if (!uuid.test(id)) return "invalid";
+  const entry = entries.find((e) => same(e.projectId, projectId));
+  return entry?.mode === "selected" && entry.secretIds.some((x) => same(x, id)) ? "duplicate" : "ok";
+}
+export function addSecret(entries: readonly SelectionEntry[], projectId: string, raw: string): SelectionEntry[] {
+  if (checkSecretId(entries, projectId, raw) !== "ok") return [...entries];
+  return entries.map((e) => !same(e.projectId, projectId) || e.mode !== "selected" ? e : { ...e, secretIds: [...e.secretIds, raw.trim().toLowerCase()] });
+}
+export function removeSecret(entries: readonly SelectionEntry[], projectId: string, secretId: string): SelectionEntry[] {
+  return entries.map((e) => !same(e.projectId, projectId) || e.mode !== "selected" ? e : { ...e, secretIds: e.secretIds.filter((id) => !same(id, secretId)) });
+}
+const SECRET_ID_MESSAGE: Record<SecretIdCheck, string> = { empty: "", ok: "", invalid: "Enter a secret UUID (36 characters, like 0a1b2c3d-…).", duplicate: "Already added." };
+export function SecretIdEditor({ entry, entries, name, onChange }: { entry: Extract<SelectionEntry, { mode: "selected" }>; entries: readonly SelectionEntry[]; name: string; onChange: (next: SelectionEntry[]) => void }) {
+  const [raw, setRaw] = useState("");
+  const [removed, setRemoved] = useState("");
+  const key = entry.projectId.toLowerCase();
+  const check = checkSecretId(entries, entry.projectId, raw);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const add = () => { onChange(addSecret(entries, entry.projectId, raw)); setRaw(""); setRemoved(""); inputRef.current?.focus(); };
+  return <div>
+    <p id={`manual-note-${key}`}><small>Secret IDs are entered by you. They are not checked against the project when you save. Sync checks each secret at run time and skips any that is not in this project.</small></p>
+    <label>Add a secret by UUID<input ref={inputRef} value={raw} aria-invalid={check==="invalid"||check==="duplicate"} aria-describedby={`manual-note-${key} secret-hint-${key}`}
+      onChange={(e)=>setRaw(e.target.value)} onKeyDown={(e)=>{ if (e.key==="Enter") { e.preventDefault(); if (check==="ok") add(); } }} /><small id={`secret-hint-${key}`}>{SECRET_ID_MESSAGE[check]}</small></label>
+    <button type="button" disabled={check!=="ok"} onClick={add}>Add secret</button>
+    <div role="status" aria-live="polite">{removed?`Removed secret ${removed.slice(0,8)}.`:""}</div>
+    {entry.secretIds.length===0
+      ? <p role="note">No secrets chosen for {name}. Add at least one secret UUID before saving.</p>
+      : <ul aria-label={`Secrets selected in ${name}`}>{entry.secretIds.map((id)=><li key={id.toLowerCase()}><span className="uuid">{id}</span>
+          <button type="button" aria-label={`Remove secret ${id} from ${name}`} onClick={()=>{ onChange(removeSecret(entries, entry.projectId, id)); setRemoved(id); inputRef.current?.focus(); }}>Remove secret</button></li>)}</ul>}
+  </div>;
 }
 const vars: React.CSSProperties = { color: "var(--foreground, #17202a)", background: "var(--background, #fff)", fontFamily: "inherit" };
 const css = `
@@ -167,7 +205,7 @@ export function BsmSettingsPage({ context }: { context: { companyId?: string | n
   useEffect(() => { let alive = true; Promise.all([getStatus({}), getSettings({})]).then(([s,g]) => { if (!alive) return; setStatus(s as Status); const result = g as SettingsResult; if (!result.ok) setLocked(true); else setConfig(result.config ?? {}); }).catch(() => { if (alive) setLocked(true); }).finally(() => { if (alive) setLoaded(true); }); return () => { alive = false; }; }, []);
   const { entries, legacy } = selectionsFromConfig(config);
   const setEntries = (next: SelectionEntry[]) => setConfig((c) => { const { bsmProjectIds: _legacy, ...rest } = c; return { ...rest, bsmProjectSelections: next }; });
-  const [found, setFound] = useState<{id:string;name:string|null}[]>([]), [projectSecrets, setProjectSecrets] = useState<Record<string,{id:string;key:string}[]>>({}), [manualProject, setManualProject] = useState(""), [stash, setStash] = useState<Record<string,string[]>>({}), [discovered, setDiscovered] = useState(false), [loadedSecrets, setLoadedSecrets] = useState<Record<string,boolean>>({}), [scopeNote, setScopeNote] = useState(""), scopeRef = useRef<HTMLHeadingElement>(null);
+  const [found, setFound] = useState<{id:string;name:string|null}[]>([]), [manualProject, setManualProject] = useState(""), [stash, setStash] = useState<Record<string,string[]>>({}), [discovered, setDiscovered] = useState(false), [scopeNote, setScopeNote] = useState(""), scopeRef = useRef<HTMLHeadingElement>(null);
   const manualValid = uuid.test(manualProject), manualDuplicate = manualValid && entries.some((e) => same(e.projectId, manualProject));
   const canDiscover = !!config.bsmAccessToken && !!String(config.bsmOrganizationId ?? "").match(uuid);
   const errors = [status?.errorCode,status?.warningCode].filter(Boolean);
@@ -177,9 +215,7 @@ export function BsmSettingsPage({ context }: { context: { companyId?: string | n
   const change = (key: string, value: unknown) => setConfig((c) => ({ ...c, [key]: value }));
   const outgoingSettings = () => { const { bsmProjectIds: _legacy, ...rest } = config; return entries.length ? { ...rest, bsmProjectSelections: entries } : rest; };
   const discover = usePluginAction("discover-secrets");
-  useEffect(() => { const next = entries.find((e) => e.mode === "selected" && !loadedSecrets[e.projectId.toLowerCase()]); if (next && !busy && loaded && !locked) void loadProjectSecrets(next.projectId); });
   async function discoverProjects() { setBusy(true); setMessage(""); try { const r = await discover({}) as {ok:boolean;errorCode?:string;projects?:{id:string;name:string|null}[]}; if (!r.ok) setMessage(r.errorCode ?? "setup_failed"); else { setFound(r.projects ?? []); setDiscovered(true); } } catch { setMessage("setup_failed"); } finally { setBusy(false); } }
-  async function loadProjectSecrets(projectId: string) { setLoadedSecrets((m) => ({...m,[projectId.toLowerCase()]:true})); setBusy(true); setMessage(""); try { const r = await discover({projectId}) as {ok:boolean;errorCode?:string;secrets?:{id:string;key:string}[]|null}; if (!r.ok) setMessage(r.errorCode ?? "setup_failed"); else setProjectSecrets((m) => ({...m,[projectId.toLowerCase()]:r.secrets ?? []})); } catch { setMessage("setup_failed"); } finally { setBusy(false); } }
   async function save() {
     if (!companyId) { setMessage("Open this page from a company."); return; }
     setBusy(true); setMessage(""); setNotice(""); setFieldError("");
@@ -224,24 +260,21 @@ export function BsmSettingsPage({ context }: { context: { companyId?: string | n
     <section id="scope"><h2 ref={scopeRef} tabIndex={-1}>2. Scope</h2><div className="grid">
       <label className="org-field">Organization UUID<input value={String(config.bsmOrganizationId??"")} aria-invalid={fieldError==="bsmOrganizationId"} aria-describedby={fieldError==="bsmOrganizationId"?"org-error":undefined} onChange={(e)=>change("bsmOrganizationId",e.target.value)} />{fieldError==="bsmOrganizationId"&&<small id="org-error">Enter a valid organization UUID.</small>}</label>
       <fieldset className="org-field" aria-describedby={fieldError==="bsmProjectSelections"||fieldError==="bsmProjectIds"?"projects-error":undefined}><legend>Projects and secrets to sync</legend>
-        {legacy&&<p role="note">This setting uses the older project list. It means <strong>all secrets in each project</strong>, including new ones. Saving converts it to the new per-project selection without changing what syncs.</p>}
-        <p>Pick a project, then sync all of its secrets (new ones included) or only the secrets you tick. Nothing outside this list is read for syncing.</p>
+        {legacy&&<p role="note">This setting uses the older project list. It means <strong>all secrets in each project</strong>. Whole-project sync is not available with the current Bitwarden SDK, so sync fails closed before it reads any value. Saving converts the list to the new form and keeps each project as "All secrets". To sync, switch each project to "Only selected secrets" and add secret UUIDs.</p>}
+        <p>Pick a project, then add the UUID of each secret to sync. Project membership of those secrets is not verified when you save. Sync checks it at run time and fails closed. Nothing outside this list is read for syncing.</p>
         <button type="button" disabled={busy||!canDiscover} aria-describedby="find-hint" onClick={()=>void discoverProjects()}>Find projects</button><small id="find-hint">Uses the saved credential and organization. Save the credential first.</small>
         <div role="status" aria-live="polite">{discovered&&(found.length===0?"No projects found for this organization and credential.":`${found.length} project${found.length===1?"":"s"} found.`)}</div>
-        {found.length>0&&<ul aria-label="Projects found">{found.map((p)=>{ const on=entries.some((e)=>same(e.projectId,p.id)); return <li key={p.id}><label className="inline-control"><input type="checkbox" checked={on} onChange={(e)=>setEntries(e.target.checked?includeProject(entries,p.id):excludeProject(entries,p.id))} /> {p.name??"Unnamed project"} · {p.id.slice(0,8)}</label></li>; })}</ul>}
+        {found.length>0&&<ul aria-label="Projects found">{found.map((p)=>{ const on=entries.some((e)=>same(e.projectId,p.id)); return <li key={p.id}><label className="inline-control"><input type="checkbox" checked={on} onChange={(e)=>setEntries(e.target.checked?includeProject(entries,p.id,"selected"):excludeProject(entries,p.id))} /> {p.name??"Unnamed project"} · {p.id.slice(0,8)}</label></li>; })}</ul>}
         <label>Add a project by UUID<input value={manualProject} aria-invalid={manualProject!==""&&!manualValid} aria-describedby="manual-hint" onChange={(e)=>setManualProject(e.target.value.trim())} /><small id="manual-hint">{manualProject===""?"":!manualValid?"Enter a project UUID (36 characters).":manualDuplicate?"Already added.":""}</small></label>
-        <button type="button" disabled={!manualValid||manualDuplicate} onClick={()=>{ setEntries(includeProject(entries,manualProject)); setManualProject(""); }}>Add project</button>
+        <button type="button" disabled={!manualValid||manualDuplicate} onClick={()=>{ setEntries(includeProject(entries,manualProject,"selected")); setManualProject(""); }}>Add project</button>
         {entries.length===0&&<p>No project chosen yet. Choose at least one project.</p>}
-        {entries.map((entry)=>{ const key=entry.projectId.toLowerCase(); const name=found.find((p)=>same(p.id,entry.projectId))?.name??"Project"; const list=projectSecrets[key]; const ids=entry.mode==="selected"?entry.secretIds:[]; const known=new Set((list??[]).map((x)=>x.id.toLowerCase()));
-          return <div className="card" key={key}><fieldset><legend><h3>{name}</h3><small className="uuid">{entry.projectId}</small></legend>
-          <div className="grid"><label className="radio-option"><input type="radio" name={`mode-${key}`} checked={entry.mode==="all"} onChange={()=>{ if(entry.mode==="selected") setStash((m)=>({...m,[key]:entry.secretIds})); setEntries(setProjectMode(entries,entry.projectId,"all")); }} />All secrets, including new ones</label>
-          <label className="radio-option"><input type="radio" name={`mode-${key}`} checked={entry.mode==="selected"} onChange={()=>setEntries(setProjectMode(entries,entry.projectId,"selected",stash[key]??[]))} />Only selected secrets</label></div>
-          {entry.mode==="selected"&&<><button type="button" disabled={busy} onClick={()=>void loadProjectSecrets(entry.projectId)}>Reload secret names</button>
-            <div role="status" aria-live="polite">{busy&&!list?"Loading secret names…":list&&list.length===0?"This project has no secrets.":""}</div>
-            <ul aria-label={`Secrets in ${name}`}>{[...new Map([...ids.map((id)=>[id.toLowerCase(),{id,key:list?.find((x)=>same(x.id,id))?.key??"Selected secret"}] as const),...(list??[]).map((x)=>[x.id.toLowerCase(),x] as const)]).values()].map((x)=>{ const missing=!!list&&!known.has(x.id.toLowerCase()); return <li key={x.id.toLowerCase()}><label className="inline-control"><input type="checkbox" checked={ids.some((id)=>same(id,x.id))} onChange={()=>setEntries(toggleSecret(entries,entry.projectId,x.id))} /> {x.key} · {x.id.slice(0,8)}{missing&&<small> Not found in this project. Untick it.</small>}</label></li>; })}</ul>
-            {entry.secretIds.length===0&&<small>Tick at least one secret, or choose all secrets.</small>}</>}
+        {entries.map((entry)=>{ const key=entry.projectId.toLowerCase(); const name=found.find((p)=>same(p.id,entry.projectId))?.name??"Project";           return <div className="card" key={key}><fieldset><legend><h3>{name}</h3><small className="uuid">{entry.projectId}</small></legend>
+          <div className="grid"><label className="radio-option"><input type="radio" name={`mode-${key}`} checked={entry.mode==="selected"} onChange={()=>setEntries(setProjectMode(entries,entry.projectId,"selected",stash[key]??[]))} />Only selected secrets</label>
+          <label className="radio-option"><input type="radio" name={`mode-${key}`} checked={entry.mode==="all"} onChange={()=>{ if(entry.mode==="selected") setStash((m)=>({...m,[key]:entry.secretIds})); setEntries(setProjectMode(entries,entry.projectId,"all")); }} />All secrets in the project</label></div>
+          {entry.mode==="all"&&<p role="note"><strong>Whole-project sync is not available with the current Bitwarden SDK.</strong> It does not report which project a secret belongs to without reading the value. Sync fails closed before it reads any value, and nothing in this project syncs. Choose "Only selected secrets" and add secret UUIDs.</p>}
+          {entry.mode==="selected"&&<SecretIdEditor entry={entry} entries={entries} name={name} onChange={setEntries} />}
           <button type="button" aria-label={`Remove project ${name}`} onClick={()=>{ setEntries(excludeProject(entries,entry.projectId)); setTimeout(()=>scopeRef.current?.focus(),0); }}>Remove project</button></fieldset></div>; })}
-        {(fieldError==="bsmProjectSelections"||fieldError==="bsmProjectIds")&&<small id="projects-error">Check the project selection: each project needs all secrets or at least one ticked secret.</small>}
+        {(fieldError==="bsmProjectSelections"||fieldError==="bsmProjectIds")&&<small id="projects-error">Check the project selection: each project needs at least one valid secret UUID.</small>}
       </fieldset>
       <label>Sync interval (minutes)<input type="number" min={5} value={Number(config.syncIntervalMinutes??15)} onChange={(e)=>change("syncIntervalMinutes",Number(e.target.value))} /></label>
       <label>Target key prefix<input value={String(config.targetSecretKeyPrefix??"bitwarden.")} onChange={(e)=>change("targetSecretKeyPrefix",e.target.value)} /></label>
