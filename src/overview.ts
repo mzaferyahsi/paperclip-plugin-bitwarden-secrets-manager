@@ -132,7 +132,7 @@ export function registerOverviewActions(ctx: PluginContext, dependencies: Overvi
     } catch (error) { return fail((error as { name?: string; code?: unknown })?.name === "AdapterError" && typeof (error as { code?: unknown }).code === "string" ? (error as { code: string }).code : "remote_unavailable"); }
   });
 
-  /** Metadata only: IDs and keys. Project membership needs a source fetch, so values are read in memory and dropped by the adapter. */
+  /** Metadata only. Projects are listed; per-project secrets are unavailable because membership needs a value read. */
   ctx.actions.register("discover-secrets", async (params, actionContext) => {
     const companyId = userCompany(actionContext);
     if (!companyId) return { ok: false, errorCode: "user_context_required", error: describeCode("user_context_required") };
@@ -150,17 +150,9 @@ export function registerOverviewActions(ctx: PluginContext, dependencies: Overvi
         .map((p) => ({ id: p.id, name: p.name ?? null })) : [];
       if (projectId === undefined) return { ok: true, projects, secrets: null };
       if (!projects.some((p) => p.id.toLowerCase() === projectId.toLowerCase())) return fail("project_selection_invalid");
-      if (!sdk.describeSecrets) return fail("selection_unverified");
-      const listed = (await sdk.listSecretIds(organizationId)).filter((s) => s.organizationId === organizationId);
-      if (listed.length > 500) return fail("snapshot_incomplete");
-      const secrets: { id: string; key: string }[] = [];
-      for (let offset = 0; offset < listed.length; offset += 100) {
-        const described = await sdk.describeSecrets(listed.slice(offset, offset + 100).map((s) => s.id));
-        for (const meta of described) {
-          if (meta.organizationId === organizationId && !meta.archived && meta.projectId?.toLowerCase() === projectId.toLowerCase()) secrets.push({ id: meta.id, key: meta.key });
-        }
-      }
-      return { ok: true, projects, projectId, secrets };
+      // Listing a project's secrets needs project membership, which the SDK only returns with the value.
+      // Reading values is not approved for discovery, so fail closed.
+      return fail("project_membership_unavailable");
     } catch (error) { return fail((error as { name?: string; code?: unknown })?.name === "AdapterError" && typeof (error as { code?: unknown }).code === "string" ? (error as { code: string }).code : "remote_unavailable"); }
   });
 }

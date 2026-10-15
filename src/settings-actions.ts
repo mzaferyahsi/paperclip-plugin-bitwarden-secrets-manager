@@ -215,8 +215,9 @@ const sameSelection = (a: BsmConfig, b: BsmConfig) => {
 };
 
 /**
- * Selected-secret entries are checked against Bitwarden before they are saved: each ID must exist and
- * belong to its entry's project. Only the selected IDs are read, in memory; values are dropped by the adapter.
+ * Selected-secret entries are checked against Bitwarden metadata before they are saved: each project must be
+ * visible and each ID must be listed. No secret value is read. Project membership is not available as
+ * metadata, so it is enforced at sync time, where a selected ID outside its project is skipped.
  * Unverifiable means rejected. Unchanged selections are not re-checked, so token rotation never depends on it.
  */
 async function verifySelection(dependencies: SettingsDependencies, next: BsmConfig, old: BsmConfig, getToken: () => Promise<string>): Promise<string | null> {
@@ -227,19 +228,12 @@ async function verifySelection(dependencies: SettingsDependencies, next: BsmConf
   try {
     const org = String(next.bsmOrganizationId);
     const sdk = await (dependencies.createSdk ?? createAuthenticatedBitwardenSdk)(await getToken(), next.bitwardenRegion === "EU" ? "EU" : "US");
-    if (!sdk.describeSecrets) return "selection_unverified";
     if (sdk.listProjects) {
       const visible = new Set((await sdk.listProjects(org)).filter((p) => p.organizationId === org).map((p) => p.id.toLowerCase()));
       if (selection.entries.some((e) => !visible.has(e.projectId.toLowerCase()))) return "project_selection_invalid";
     }
     const listed = new Set((await sdk.listSecretIds(org)).filter((s) => s.organizationId === org).map((s) => s.id.toLowerCase()));
-    const ids = selected.flatMap((e) => e.secretIds);
-    if (ids.some((id) => !listed.has(id.toLowerCase()))) return "secret_selection_invalid";
-    const described = new Map((await sdk.describeSecrets(ids)).map((m) => [m.id.toLowerCase(), m]));
-    for (const entry of selected) for (const id of entry.secretIds) {
-      const meta = described.get(id.toLowerCase());
-      if (!meta || meta.organizationId !== org || meta.archived || meta.projectId?.toLowerCase() !== entry.projectId.toLowerCase()) return "secret_selection_invalid";
-    }
+    if (selected.flatMap((e) => e.secretIds).some((id) => !listed.has(id.toLowerCase()))) return "secret_selection_invalid";
     return null;
   } catch { return "selection_unverified"; }
 }

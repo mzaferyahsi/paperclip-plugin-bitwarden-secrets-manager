@@ -7,6 +7,7 @@ const MESSAGES: Record<string, { message: string; action: string }> = {
   project_selection_invalid: { message: "The project selection is empty, malformed or has a duplicate, or a selected-secrets project has no secrets.", action: "Choose at least one project. For selected secrets, tick at least one secret per project, then save." },
   project_selection_conflict: { message: "Both the old project list and the new project selection are set.", action: "Save the selection again from this page. It replaces the old project list." },
   secret_selection_invalid: { message: "A selected secret does not exist or is not in the project you chose.", action: "Reload the secret list for that project, tick the secrets again and save." },
+  project_membership_unavailable: { message: "Bitwarden does not report which project a secret belongs to without reading its value, so whole-project sync is not available and nothing was read.", action: "Choose only specific secrets for each project, or wait for a source API that lists project membership." },
   selection_unverified: { message: "The selected secrets could not be checked against Bitwarden, so nothing was saved.", action: "Press Test connection, then save again." },
   paperclip_origin_invalid: { message: "The Paperclip origin must be an https:// address with no path.", action: "Enter an origin such as https://paperclip.example and save." },
   unsupported_destination_scope: { message: "Only company destinations are supported in this version.", action: "Remove the destination scope setting or set it to company." },

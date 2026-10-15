@@ -37,7 +37,7 @@ function harness() {
     const cfg = { bsmOrganizationId: org, targetSecretKeyPrefix: "bitwarden.", archiveOnRemoval: true, ...selection, ...extra };
     return syncCompany(cfg, {
       sdk: {
-        listSecretIds: async () => source.map((s) => ({ id: s.id, organizationId: org })),
+        listSecretIds: async () => source.map((s) => ({ id: s.id, organizationId: org, projectId: s.projectId })),
         getSecrets: async (ids) => { fetched.push([...ids]); return source.filter((s) => ids.includes(s.id)); },
       },
       native: new PaperclipSecretsAdapter(transport, "company-1"), previousState: state,

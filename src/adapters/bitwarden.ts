@@ -70,16 +70,6 @@ export function bitwardenSdkAdapter(client: BitwardenClientLike): BsmSdk {
       }));
     },
   };
-  adapter.describeSecrets = async ids => {
-    const rows = await bounded(sdkRows<any>(() => client.secrets().getByIds([...ids])));
-    if (!rows) throw new AdapterError("snapshot_incomplete");
-    if (rows.some(row => !row.id || !row.organizationId || row.projectId === undefined || row.key === undefined)) throw new AdapterError("snapshot_incomplete");
-    // Project membership is only returned with the value. Copy metadata fields only.
-    return rows.map(row => ({
-      id: row.id!, organizationId: row.organizationId!, projectId: row.projectId ?? null, key: row.key!,
-      ...(row.archived === undefined ? {} : { archived: row.archived }),
-    }));
-  };
   if (client.projects) {
     adapter.listProjects = async organizationId => {
       const rows = await bounded(sdkRows<any>(() => client.projects!().list(organizationId)));
@@ -155,6 +145,9 @@ export async function readBsmSnapshot(
     }
 
     if (listed.length > 500) throw new AdapterError("snapshot_incomplete");
+    // A whole-project entry needs each secret's project before any value is read. SDK 1.0.0 list rows carry
+    // no project, so reading values to learn it would over-read other projects. Fail closed instead.
+    if (hasWholeProject && listed.some(row => row.projectId === undefined)) throw new AdapterError("project_membership_unavailable");
     // Filter before fetching values wherever the list metadata permits it.
     const candidates = listed.filter(row => {
       if (row.projectId !== undefined) return selectionAdmits(entries, row.projectId, row.id);

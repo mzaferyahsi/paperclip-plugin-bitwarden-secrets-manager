@@ -31,6 +31,7 @@ export const ERROR_CODES: Readonly<Record<string, { severity: Severity; retry: R
   project_selection_invalid: { severity: "error", retry: "none" },
   project_selection_conflict: { severity: "error", retry: "none" },
   secret_selection_invalid: { severity: "error", retry: "none" },
+  project_membership_unavailable: { severity: "error", retry: "none" },
   selection_unverified: { severity: "error", retry: "none" },
   sync_interval_invalid: { severity: "error", retry: "none" },
   target_key_prefix_invalid: { severity: "error", retry: "none" },

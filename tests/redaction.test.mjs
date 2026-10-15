@@ -70,7 +70,7 @@ test("runtime HTTP bridge sends fixture auth/value only in the request and emits
   registerRuntime(ctx, {
     createSdk: async () => ({
       listProjects: async () => [{ id: config.bsmProjectIds[0], organizationId: config.bsmOrganizationId }],
-      listSecretIds: async () => [{ id: "source-uuid", organizationId: config.bsmOrganizationId }],
+      listSecretIds: async () => [{ id: "source-uuid", organizationId: config.bsmOrganizationId, projectId: config.bsmProjectIds[0] }],
       getSecrets: async () => [{
         id: "source-uuid", organizationId: config.bsmOrganizationId, projectId: config.bsmProjectIds[0],
         key: "fixture", value: fixtureValue, revisionDate: "2026-10-11T00:00:00.000Z",

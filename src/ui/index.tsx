@@ -39,6 +39,7 @@ export const ERROR_COPY: Record<string, Copy> = {
   project_selection_invalid: { title: "The project selection is not valid", action: "Choose at least one project, and at least one secret for each selected-secrets project." },
   project_selection_conflict: { title: "Two project lists are set", action: "Save the selection again from this page. It replaces the old list." },
   secret_selection_invalid: { title: "A selected secret is not in its project", action: "Reload the secret list for that project and tick the secrets again." },
+  project_membership_unavailable: { title: "Whole-project sync is not available", action: "Bitwarden reports a secret's project only with its value, so nothing was read. Choose specific secrets instead." },
   selection_unverified: { title: "The selection could not be checked", action: "Nothing was saved. Press Test connection, then save again." },
   sync_interval_invalid: { title: "The interval is not allowed", action: "Choose a value of at least 5 minutes." },
   target_key_prefix_invalid: { title: "The key prefix is not valid", action: "Use letters, digits, dots, dashes or underscores." },

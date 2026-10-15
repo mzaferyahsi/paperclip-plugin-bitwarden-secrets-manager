@@ -60,13 +60,12 @@ test("selectionAdmits judges by the secret's actual project", () => {
 });
 
 // ---- snapshot / overfetch ----
-function sdkFixture({ hints = false, extraRows = false } = {}) {
+function sdkFixture({ hints = true, extraRows = false } = {}) {
   const fetched = [];
   const sdk = {
     listProjects: async () => [P1, P2, P3].map((pid) => ({ id: pid, organizationId: org, name: `Name-${pid.slice(-2)}` })),
     listSecretIds: async () => Object.keys(VALUES).map((sid) => ({ id: sid, organizationId: org, ...(hints ? { projectId: PROJECT_OF[sid] } : {}) })),
     getSecrets: async (ids) => { fetched.push([...ids]); return [...ids, ...(extraRows ? [S4] : [])].map((sid) => ({ id: sid, organizationId: org, projectId: PROJECT_OF[sid], key: `KEY_${sid.slice(-2)}`, value: VALUES[sid], revisionDate: "2026-10-10T00:00:00Z" })); },
-    describeSecrets: async (ids) => ids.filter((sid) => sid in VALUES).map((sid) => ({ id: sid, organizationId: org, projectId: PROJECT_OF[sid], key: `KEY_${sid.slice(-2)}` })),
   };
   return { sdk, fetched };
 }
@@ -117,12 +116,20 @@ test("a selected project that the token cannot see is an incomplete snapshot, no
   await assert.rejects(() => readBsmSnapshot(sdk, org, [{ projectId: P2, mode: "all" }]), (e) => e.code === "snapshot_incomplete");
 });
 
-test("describeSecrets returns metadata only; the value never leaves the adapter", async () => {
-  const raw = Object.keys(VALUES).map((sid) => ({ id: sid, organizationId: org, projectId: PROJECT_OF[sid], key: `KEY_${sid.slice(-2)}`, value: VALUES[sid], revisionDate: "2026-10-10T00:00:00Z" }));
-  const adapter = bitwardenSdkAdapter({ secrets: () => ({ list: async () => ({ data: [] }), getByIds: async () => ({ data: raw }) }) });
-  const described = await adapter.describeSecrets([S1, S2]);
-  assert.equal(JSON.stringify(described).includes("SECRET"), false);
-  assert.deepEqual(Object.keys(described[0]).sort(), ["id", "key", "organizationId", "projectId"]);
+test("the adapter exposes no value-reading discovery path", () => {
+  const adapter = bitwardenSdkAdapter({ secrets: () => ({ list: async () => ({ data: [] }), getByIds: async () => ({ data: [] }) }) });
+  assert.equal(adapter.describeSecrets, undefined);
+});
+
+test("whole-project fails closed without reading any value when the list carries no project", async () => {
+  const { sdk, fetched } = sdkFixture({ hints: false });
+  await assert.rejects(() => readBsmSnapshot(sdk, org, [{ projectId: P1, mode: "all" }]), (e) => e.code === "project_membership_unavailable");
+  await assert.rejects(() => readBsmSnapshot(sdk, org, new Set([P1])), (e) => e.code === "project_membership_unavailable");
+  await assert.rejects(() => readBsmSnapshot(sdk, org, [{ projectId: P1, mode: "selected", secretIds: [S1] }, { projectId: P2, mode: "all" }]), (e) => e.code === "project_membership_unavailable");
+  assert.deepEqual(fetched, [], "no value fetch happened");
+  const selectedOnly = await readBsmSnapshot(sdk, org, [{ projectId: P1, mode: "selected", secretIds: [S1] }]);
+  assert.deepEqual(fetched, [[S1]], "selected-only reads only the chosen ID");
+  assert.deepEqual(ids(selectedOnly), [S1]);
 });
 
 // ---- settings actions ----
@@ -197,8 +204,7 @@ test("unknown, out-of-project and unverifiable selected secret IDs are rejected 
   const h = harness({ ...stored, bsmProjectIds: [P1] });
   const save = (selection) => h.actions["save-settings"]({ companyId, settings: { ...common, bsmProjectSelections: selection } }, actor);
   assert.equal((await save([{ projectId: P1, mode: "selected", secretIds: [id(99)] }])).errorCode, "secret_selection_invalid", "unknown");
-  assert.equal((await save([{ projectId: P1, mode: "selected", secretIds: [S3] }])).errorCode, "secret_selection_invalid", "belongs to P2");
-  assert.equal((await save([{ projectId: P3, mode: "all" }, { projectId: P1, mode: "selected", secretIds: [S1, S4] }])).errorCode, "secret_selection_invalid");
+  assert.equal((await save([{ projectId: P1, mode: "selected", secretIds: [S1, id(98)] }])).errorCode, "secret_selection_invalid", "unknown among known");
   assert.equal((await save([{ projectId: id(77), mode: "selected", secretIds: [S1] }])).errorCode, "project_selection_invalid", "invisible project");
   const broken = harness({ ...stored, bsmProjectIds: [P1] }, { sdk: { listSecretIds: async () => { throw new AdapterError("remote_unavailable", true); }, getSecrets: async () => [] } });
   const r = await broken.actions["save-settings"]({ companyId, settings: { ...common, bsmProjectSelections: [{ projectId: P1, mode: "selected", secretIds: [S1] }] } }, actor);
@@ -236,7 +242,7 @@ test("discovery returns project names and secret keys/IDs only, never values; ge
   const projects = await h.actions["discover-secrets"]({}, actor);
   assert.equal(projects.ok, true); assert.equal(projects.secrets, null);
   const detail = await h.actions["discover-secrets"]({ projectId: P1 }, actor);
-  assert.deepEqual(detail.secrets.map((x) => x.id).sort(), [S1, S2]);
+  assert.deepEqual([detail.ok, detail.errorCode], [false, "project_membership_unavailable"]);
   for (const reply of [projects, detail]) assert.equal(JSON.stringify(reply).includes("SECRET"), false);
   assert.equal((await h.actions["discover-secrets"]({ projectId: id(77) }, actor)).errorCode, "project_selection_invalid");
   assert.equal((await h.actions["discover-secrets"]({ projectId: "nope" }, actor)).errorCode, "invalid_input");

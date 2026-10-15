@@ -36,7 +36,10 @@ test("BWSM snapshot fetches complete selected values and rejects partial batches
     list: async () => ({ success: true, data: { data: [{ id: source.id, organizationId: source.organizationId }] } }),
     getByIds: async () => ({ success: true, data: { data: [source] } }),
   }) });
-  assert.deepEqual((await readBsmSnapshot(wrapped, "org-1", new Set(["project-1"]))).secrets, [source]);
+  // The real SDK list carries no project, so whole-project scope fails closed before any value read.
+  await assert.rejects(() => readBsmSnapshot(wrapped, "org-1", new Set(["project-1"])),
+    (error: unknown) => error instanceof AdapterError && error.code === "project_membership_unavailable");
+  assert.deepEqual((await readBsmSnapshot(wrapped, "org-1", [{ projectId: "project-1", mode: "selected", secretIds: [source.id] }])).secrets, [source]);
   await assert.rejects(() => readBsmSnapshot({ ...sdk, getSecrets: async () => [] }, "org-1", new Set(["project-1"])),
     (error: unknown) => error instanceof AdapterError && error.code === "snapshot_incomplete");
   const whitespaceSnapshot = await readBsmSnapshot({
