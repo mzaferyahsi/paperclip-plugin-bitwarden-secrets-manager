@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { usePluginAction, usePluginData } from "@paperclipai/plugin-sdk/ui";
 import { ERROR_CODES } from "../error-codes.js";
 
@@ -78,13 +78,15 @@ const css = `
 .bsm{max-width:780px;padding:20px;color:var(--foreground,#17202a);background:var(--background,#fff);font:inherit}
 .bsm *{box-sizing:border-box}.bsm section,.bsm .card{border:1px solid var(--border,#697586);border-radius:10px;padding:16px;margin:14px 0}
 .bsm label{display:grid;gap:6px;margin:12px 0}.bsm input,.bsm textarea,.bsm select{width:100%;max-width:560px;min-height:42px;padding:9px 11px;border:1px solid var(--border,#596579);border-radius:6px;background:var(--background,#fff);color:var(--foreground,#17202a);font:inherit}
-.bsm button,.bsm a,.bsm [role=radio]{min-height:42px;display:inline-flex;align-items:center;padding:8px 12px;border-radius:6px}
+.bsm button,.bsm a,.bsm .radio-option{min-height:42px;display:inline-flex;align-items:center;padding:8px 12px;border-radius:6px;font:inherit}
 .bsm button{border:1px solid var(--border,#596579);background:var(--background,#fff);color:var(--foreground,#17202a);cursor:pointer}.bsm button:disabled{opacity:.55;cursor:not-allowed}
+.bsm .inline-control{display:inline-flex;align-items:center;gap:10px}.bsm .inline-control input{width:24px;height:24px;min-height:24px;max-width:none;padding:0;margin:0;flex:0 0 24px}.bsm .grid{align-items:start}.bsm .org-field{grid-column:1/-1}.bsm .radio-option{gap:8px;flex:1;border:1px solid var(--border,#596579);cursor:pointer}.bsm .radio-option input{width:18px;height:18px;min-height:18px;max-width:none;padding:0;margin:0}
 .bsm :focus-visible{outline:3px solid var(--focus,#245bcc);outline-offset:2px}.bsm .badge{display:inline-block;border:1px solid currentColor;border-radius:99px;padding:4px 10px;font-weight:700}
-.bsm .muted{opacity:.78}.bsm .error{border-left:4px solid var(--danger,#a32626)}.bsm .skeleton{height:14px;margin:12px 0;border-radius:5px;background:var(--muted,#e4e8ed);animation:bsm-pulse 1.2s ease-in-out infinite}
+.bsm .muted{color:var(--foreground,#17202a)}.bsm .error{border-left:4px solid var(--danger,#a32626)}.bsm .skeleton{height:14px;margin:12px 0;border-radius:5px;background:var(--muted,#e4e8ed);animation:bsm-pulse 1.2s ease-in-out infinite}
 @keyframes bsm-pulse{50%{opacity:.45}}.bsm .steps{display:flex;gap:8px;flex-wrap:wrap}.bsm .steps a{border:1px solid var(--border,#596579);text-decoration:none;color:inherit}
 .bsm .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.bsm .option[aria-checked=true]{background:var(--accent-subtle,#e9eef9);border-color:var(--focus,#245bcc)}
 @media(max-width:500px){.bsm{padding:12px}.bsm .grid{grid-template-columns:1fr}.bsm .steps{display:grid;grid-template-columns:1fr 1fr}.bsm .steps a{justify-content:center}}
+.bsm.widget{padding:0}.bsm.widget section{margin:0}.bsm.widget a{padding:0;text-decoration:underline;color:var(--link,var(--foreground,#17202a))}
 `;
 const stamp = (value?: string | null) => value ? new Date(value).toLocaleString() : "Not yet";
 const summary = (s?: Record<string, number> | null) => s ? Object.entries(s).map(([k,v]) => `${k}: ${v}`).join(" · ") : "No completed run yet";
@@ -96,7 +98,7 @@ function badge(status?: Status) {
   if (status.status === "partial" || status.status === "credential_cooldown") return "Partial · retrying";
   return "Needs attention";
 }
-const ErrorCard = ({ code }: { code?: string | null }) => { const copy = errorCopy(code); return copy ? <div className="card error" role="alert"><strong>{copy.title}</strong><p>{copy.action}</p><small>{copy.code}</small></div> : null; };
+const ErrorCard = ({ code }: { code?: string | null }) => { const copy = errorCopy(code); return copy ? <div className="card error" role="alert" tabIndex={-1}><strong>{copy.title}</strong><p>{copy.action}</p><small>{copy.code}</small></div> : null; };
 
 export function BsmStatusWidget({ context }: { context: { companyId?: string | null } }) {
   const { data: worker, loading: workerLoading, error: workerError } = usePluginData<{ status: string }>("worker-health");
@@ -108,9 +110,9 @@ export function BsmStatusWidget({ context }: { context: { companyId?: string | n
   let label = "", line = "";
   const view = workerLoading ? { state: "loading", badge: "", line: "" } :
     workerError ? widgetViewState("denied", loaded, status) : widgetViewState(worker?.status, loaded, status);
-  if (view.state === "loading") return <div className="bsm" style={vars}><style>{css}</style><section aria-label="Bitwarden sync loading"><span className="skeleton" /><span className="skeleton" /></section></div>;
+  if (view.state === "loading") return <div className="bsm widget" style={vars}><style>{css}</style><section aria-label="Bitwarden sync loading"><span className="skeleton" /><span className="skeleton" /></section></div>;
   label = view.badge; line = view.line;
-  return <div className="bsm" style={vars}><style>{css}</style><section aria-label="Bitwarden sync status"><strong className="badge">{label}</strong><p>{line}</p><a href={href}>Open settings</a></section></div>;
+  return <div className="bsm widget" style={vars}><style>{css}</style><section aria-label="Bitwarden sync status"><strong className="badge">{label}</strong><p>{line}</p><a href={href}>Open settings</a></section></div>;
 }
 
 export function BsmSettingsPage({ context }: { context: { companyId?: string | null } }) {
@@ -122,6 +124,8 @@ export function BsmSettingsPage({ context }: { context: { companyId?: string | n
   const [message, setMessage] = useState(""), [notice, setNotice] = useState(""), [fieldError, setFieldError] = useState(""), [token, setToken] = useState("");
   const [secrets, setSecrets] = useState<{id:string;name:string;provider:string}[]>([]), [secretId, setSecretId] = useState("");
   const [mode, setMode] = useState<"enter"|"select">("enter");
+  const errorRef = useRef<HTMLDivElement>(null);
+  useEffect(() => { if (message) errorRef.current?.querySelector<HTMLElement>("[role=alert]")?.focus(); }, [message]);
   const companyId = context.companyId;
   useEffect(() => { let alive = true; Promise.all([getStatus({}), getSettings({})]).then(([s,g]) => { if (!alive) return; setStatus(s as Status); const result = g as SettingsResult; if (!result.ok) setLocked(true); else setConfig(result.config ?? {}); }).catch(() => { if (alive) setLocked(true); }).finally(() => { if (alive) setLoaded(true); }); return () => { alive = false; }; }, []);
   const projects = Array.isArray(config.bsmProjectIds) ? (config.bsmProjectIds as string[]).join("\n") : "";
@@ -156,26 +160,27 @@ export function BsmSettingsPage({ context }: { context: { companyId?: string | n
   if (settingsViewState(loaded, !locked) === "locked") return <main className="bsm" style={vars}><style>{css}</style><h1>Bitwarden Secrets Manager</h1><StatusCard status={status} /><section><strong>Setup credential removed — settings locked (expected)</strong><p>To change settings, ask an instance admin to add the setup credential in the native plugin configuration.</p></section></main>;
   const code = message || errors[0] as string | undefined;
   return <main className="bsm" style={vars}><style>{css}</style><header><h1>Bitwarden Secrets Manager</h1><span className="badge">{badge(status)}</span></header>
+    {message&&<div ref={errorRef} tabIndex={-1}><ErrorCard code={code} /></div>}
     <StatusCard status={status} />
     {errors.map((e) => <ErrorCard key={e} code={e} />)}
     <nav className="steps" aria-label="Setup steps"><a href="#credential">1. Bitwarden credential</a><a href="#scope">2. Scope</a><a href="#paperclip">3. Paperclip access</a><a href="#review">4. Review &amp; enable</a></nav>
     <section id="credential"><h2>1. Bitwarden credential</h2><p>Enter a machine-account token or select an existing company secret. The token value is never shown again.</p>
-      <fieldset><legend>Credential method</legend><div className="grid" role="radiogroup" aria-label="Credential method">
-        <button type="button" role="radio" aria-checked={mode==="enter"} className="option" onClick={()=>setMode("enter")}>Enter token</button><button type="button" role="radio" aria-checked={mode==="select"} className="option" onClick={()=>setMode("select")}>Use existing secret</button></div></fieldset>
+      <fieldset><legend>Credential method</legend><div className="grid">
+        <label className="radio-option"><input type="radio" name="credential-method" value="enter" checked={mode==="enter"} onChange={()=>setMode("enter")} />Enter token</label><label className="radio-option"><input type="radio" name="credential-method" value="select" checked={mode==="select"} onChange={()=>setMode("select")} />Use existing secret</label></div></fieldset>
       {mode==="enter" ? <label>Machine-account token<input type="password" autoComplete="new-password" value={token} onChange={(e)=>setToken(e.target.value)} aria-describedby="token-help" /><small id="token-help">A replacement token is stored as an encrypted company secret.</small></label> : <><button type="button" disabled={busy} onClick={()=>void loadSecrets()}>Load secret metadata</button><label>Existing secret<select value={secretId} onChange={(e)=>setSecretId(e.target.value)}><option value="">Select an active secret</option>{secrets.map((s)=><option key={s.id} value={s.id}>{s.name} · {s.provider} · {s.id.slice(0,8)}</option>)}</select></label><button type="button" disabled={busy||!secretId} onClick={()=>void useSecret()}>Use selected secret</button></>}
-      {mode==="enter"&&<button type="button" disabled={busy||!token.trim()} onClick={()=>void replaceToken()}>Save credential</button>}
+      {mode==="enter"&&<><button type="button" aria-describedby={!token.trim()?"save-credential-hint":undefined} disabled={busy||!token.trim()} onClick={()=>void replaceToken()}>Save credential</button>{!token.trim()&&<small id="save-credential-hint">Enter a token first.</small>}</>}
     </section>
     <section id="scope"><h2>2. Scope</h2><div className="grid">
-      <label>Organization UUID<input value={String(config.bsmOrganizationId??"")} aria-invalid={fieldError==="bsmOrganizationId"} aria-describedby={fieldError==="bsmOrganizationId"?"org-error":undefined} onChange={(e)=>change("bsmOrganizationId",e.target.value)} />{fieldError==="bsmOrganizationId"&&<small id="org-error">Enter a valid organization UUID.</small>}</label>
+      <label className="org-field">Organization UUID<input value={String(config.bsmOrganizationId??"")} aria-invalid={fieldError==="bsmOrganizationId"} aria-describedby={fieldError==="bsmOrganizationId"?"org-error":undefined} onChange={(e)=>change("bsmOrganizationId",e.target.value)} />{fieldError==="bsmOrganizationId"&&<small id="org-error">Enter a valid organization UUID.</small>}</label>
       <label>Project UUIDs, one per line<textarea rows={4} value={projects} aria-invalid={fieldError==="bsmProjectIds"} aria-describedby={fieldError==="bsmProjectIds"?"projects-error":undefined} onChange={(e)=>change("bsmProjectIds",e.target.value.split(/\n/).map(x=>x.trim()).filter(Boolean))} />{fieldError==="bsmProjectIds"&&<small id="projects-error">Enter one valid project UUID per line.</small>}</label>
       <label>Sync interval (minutes)<input type="number" min={5} value={Number(config.syncIntervalMinutes??15)} onChange={(e)=>change("syncIntervalMinutes",Number(e.target.value))} /></label>
       <label>Target key prefix<input value={String(config.targetSecretKeyPrefix??"bitwarden.")} onChange={(e)=>change("targetSecretKeyPrefix",e.target.value)} /></label>
       <label>Bitwarden region<select value={String(config.bitwardenRegion??"US")} onChange={(e)=>change("bitwardenRegion",e.target.value)}><option>US</option><option>EU</option></select></label>
-      <label><span><input type="checkbox" checked={config.archiveOnRemoval===true} onChange={(e)=>change("archiveOnRemoval",e.target.checked)} /> Allow archive after two complete missing snapshots</span></label>
+      <label><span className="inline-control"><input type="checkbox" checked={config.archiveOnRemoval===true} onChange={(e)=>change("archiveOnRemoval",e.target.checked)} /> Allow archive after two complete missing snapshots</span></label>
     </div><p>Paperclip address: {String(config.paperclipApiOrigin??"Not set")}</p><button disabled={busy} onClick={()=>void save()}>Save settings</button><p className="muted">Saving turns sync off.</p></section>
     <section id="paperclip"><h2>3. Paperclip access</h2><p>Runtime credential: {config.paperclipApiToken ? "Configured" : "Not set"}.</p><p>Setup reference: {config.paperclipSetupApiToken ? "Configured" : "Not set — expected after setup"}.</p><p>Paperclip credentials are managed by an instance admin in the native plugin configuration. This page cannot edit them.</p></section>
-    <section id="review"><h2>4. Review &amp; enable</h2><StatusCard status={status} /><p>Review the organization and project scope above. Sync runs on its schedule; this page does not start a run.</p><label><span><input type="checkbox" role="switch" aria-label="Enable sync" checked={config.enabled===true} disabled={busy||!valid} onChange={(e)=>void toggle(e.target.checked)} /> Enable sync</span></label>{!valid&&<p>Save valid settings and configure both credentials before enabling sync.</p>}</section>
-    {message&&<ErrorCard code={code} />}{notice&&<p role="status">{notice}</p>}
+    <section id="review"><h2>4. Review &amp; enable</h2><p>Status: <strong>{badge(status)}</strong>. Last run: {summary(status?.lastRunSummary)}</p><p>Review the organization and project scope above. Sync runs on its schedule; this page does not start a run.</p><label><span className="inline-control"><input type="checkbox" role="switch" aria-label="Enable sync" aria-describedby={!valid?"enable-sync-hint":undefined} checked={config.enabled===true} disabled={busy||!valid} onChange={(e)=>void toggle(e.target.checked)} /> Enable sync</span></label>{!valid&&<p id="enable-sync-hint">Save valid settings first. Configure both credentials and the project scope before enabling sync.</p>}</section>
+    {notice&&<p role="status">{notice}</p>}
   </main>;
 }
 function StatusCard({status}:{status:Status|null}) { return <section aria-label="Sync status"><h2>Status: {badge(status)}</h2><p>Last success: {stamp(status?.lastSuccessAt)} · Last attempt: {stamp(status?.lastAttemptAt)}</p><p>Next run: {stamp(status?.nextEligibleAt)}</p><p>Last run: {summary(status?.lastRunSummary)}</p></section>; }
