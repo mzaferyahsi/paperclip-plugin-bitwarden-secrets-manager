@@ -1,5 +1,5 @@
 import type { PluginContext } from "@paperclipai/plugin-sdk";
-import { isSecretRef, validateConfig, type BsmConfig } from "./config.js";
+import { isSecretRef, normalizeSelection, validateConfig, type BsmConfig } from "./config.js";
 import { createAuthenticatedBitwardenSdk } from "./adapters/bitwarden.js";
 import type { BsmSdk } from "./adapters/types.js";
 import type { SyncCounts } from "./sync.js";
@@ -30,8 +30,11 @@ export function buildOverview(config: BsmConfig, state: StoredState, nowMs = Dat
   const bsmToken = isSecretRef(config.bsmAccessToken);
   const paperclipToken = isSecretRef(config.paperclipApiToken);
   const setupToken = isSecretRef(config.paperclipSetupApiToken);
-  const projects = Array.isArray(config.bsmProjectIds) ? (config.bsmProjectIds as unknown[]).filter((id): id is string => typeof id === "string")
-    .map((id) => ({ id, name: state.projectNames?.[id] ?? null })) : [];
+  const selection = normalizeSelection(config);
+  const projects = selection.ok ? selection.entries.map((entry) => ({
+    id: entry.projectId, name: state.projectNames?.[entry.projectId] ?? null, mode: entry.mode,
+    ...(entry.mode === "selected" ? { selectedSecretCount: entry.secretIds.length } : {}),
+  })) : [];
   const interval = Math.max(5, Number(config.syncIntervalMinutes ?? 15));
   const cooldownMs = millis(state.nextEligibleAt);
   const blockingCodes = [...AUTHORIZATION_BLOCKED];
@@ -61,7 +64,7 @@ export function buildOverview(config: BsmConfig, state: StoredState, nowMs = Dat
     credentials: { bitwardenToken: bsmToken, paperclipToken, paperclipSetupToken: setupToken },
     scope: {
       organizationId: typeof config.bsmOrganizationId === "string" ? config.bsmOrganizationId : null,
-      region: config.bitwardenRegion === "EU" ? "EU" : "US", projects,
+      region: config.bitwardenRegion === "EU" ? "EU" : "US", projects, legacySelection: selection.ok && selection.legacy,
       intervalMinutes: interval, archiveOnRemoval: config.archiveOnRemoval === true,
     },
     lastSync: {
@@ -72,7 +75,7 @@ export function buildOverview(config: BsmConfig, state: StoredState, nowMs = Dat
     checklist: [
       { id: "bsm-token", label: "Bitwarden machine access token added", done: bsmToken },
       { id: "organization", label: "Organization UUID entered", done: typeof config.bsmOrganizationId === "string" && UUID.test(config.bsmOrganizationId) },
-      { id: "projects", label: "At least one project UUID entered", done: projects.length > 0 },
+      { id: "projects", label: "At least one project chosen", done: projects.length > 0 },
       { id: "paperclip-token", label: "Paperclip API token bound by an instance admin", done: paperclipToken },
       { id: "origin", label: "Paperclip origin entered", done: typeof config.paperclipApiOrigin === "string" && config.paperclipApiOrigin !== "" },
       { id: "test", label: "Connection tested", done: Boolean(state.projectNames) },
@@ -92,7 +95,7 @@ export function registerOverviewActions(ctx: PluginContext, dependencies: Overvi
       return {
         ok: true, ...buildOverview(config, state),
         config: {
-          bsmOrganizationId: config.bsmOrganizationId, bsmProjectIds: config.bsmProjectIds, paperclipApiOrigin: config.paperclipApiOrigin,
+          bsmOrganizationId: config.bsmOrganizationId, bsmProjectIds: config.bsmProjectIds, bsmProjectSelections: config.bsmProjectSelections, paperclipApiOrigin: config.paperclipApiOrigin,
           syncIntervalMinutes: config.syncIntervalMinutes, targetSecretKeyPrefix: config.targetSecretKeyPrefix,
           archiveOnRemoval: config.archiveOnRemoval, bitwardenRegion: config.bitwardenRegion,
         },
@@ -112,7 +115,8 @@ export function registerOverviewActions(ctx: PluginContext, dependencies: Overvi
       const token = await ctx.secrets.resolve(config.bsmAccessToken, { companyId, configPath: "bsmAccessToken" });
       const sdk = await (dependencies.createSdk ?? createAuthenticatedBitwardenSdk)(token, config.bitwardenRegion === "EU" ? "EU" : "US");
       const visible = sdk.listProjects ? (await sdk.listProjects(organizationId)).filter((p) => p.organizationId === organizationId) : [];
-      const selected = new Set(Array.isArray(config.bsmProjectIds) ? config.bsmProjectIds as string[] : []);
+      const parsed = normalizeSelection(config);
+      const selected = new Set(parsed.ok ? parsed.entries.map((entry) => entry.projectId) : []);
       const secrets = (await sdk.listSecretIds(organizationId)).filter((s) => s.organizationId === organizationId);
       const names: Record<string, string> = {};
       for (const project of visible) if (selected.has(project.id) && project.name) names[project.id] = project.name;
@@ -125,6 +129,38 @@ export function registerOverviewActions(ctx: PluginContext, dependencies: Overvi
         missingProjectIds: missing,
         note: missing.length ? "Some selected projects are not visible to this token. Check the project UUIDs and the token's project access." : null,
       };
+    } catch (error) { return fail((error as { name?: string; code?: unknown })?.name === "AdapterError" && typeof (error as { code?: unknown }).code === "string" ? (error as { code: string }).code : "remote_unavailable"); }
+  });
+
+  /** Metadata only: IDs and keys. Project membership needs a source fetch, so values are read in memory and dropped by the adapter. */
+  ctx.actions.register("discover-secrets", async (params, actionContext) => {
+    const companyId = userCompany(actionContext);
+    if (!companyId) return { ok: false, errorCode: "user_context_required", error: describeCode("user_context_required") };
+    const fail = (code: string) => ({ ok: false, errorCode: code, error: describeCode(code) });
+    const projectId = params.projectId;
+    if (projectId !== undefined && (typeof projectId !== "string" || !UUID.test(projectId))) return fail("invalid_input");
+    try {
+      const config = await ctx.config.get(companyId) as BsmConfig;
+      if (!isSecretRef(config.bsmAccessToken)) return fail("bsm_credential_required");
+      const organizationId = typeof config.bsmOrganizationId === "string" && UUID.test(config.bsmOrganizationId) ? config.bsmOrganizationId : "";
+      if (!organizationId) return fail("organization_invalid");
+      const token = await ctx.secrets.resolve(config.bsmAccessToken, { companyId, configPath: "bsmAccessToken" });
+      const sdk = await (dependencies.createSdk ?? createAuthenticatedBitwardenSdk)(token, config.bitwardenRegion === "EU" ? "EU" : "US");
+      const projects = sdk.listProjects ? (await sdk.listProjects(organizationId)).filter((p) => p.organizationId === organizationId)
+        .map((p) => ({ id: p.id, name: p.name ?? null })) : [];
+      if (projectId === undefined) return { ok: true, projects, secrets: null };
+      if (!projects.some((p) => p.id.toLowerCase() === projectId.toLowerCase())) return fail("project_selection_invalid");
+      if (!sdk.describeSecrets) return fail("selection_unverified");
+      const listed = (await sdk.listSecretIds(organizationId)).filter((s) => s.organizationId === organizationId);
+      if (listed.length > 500) return fail("snapshot_incomplete");
+      const secrets: { id: string; key: string }[] = [];
+      for (let offset = 0; offset < listed.length; offset += 100) {
+        const described = await sdk.describeSecrets(listed.slice(offset, offset + 100).map((s) => s.id));
+        for (const meta of described) {
+          if (meta.organizationId === organizationId && !meta.archived && meta.projectId?.toLowerCase() === projectId.toLowerCase()) secrets.push({ id: meta.id, key: meta.key });
+        }
+      }
+      return { ok: true, projects, projectId, secrets };
     } catch (error) { return fail((error as { name?: string; code?: unknown })?.name === "AdapterError" && typeof (error as { code?: unknown }).code === "string" ? (error as { code: string }).code : "remote_unavailable"); }
   });
 }

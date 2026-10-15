@@ -1,5 +1,6 @@
 import { AdapterError } from "./types.js";
 import type { BsmSdk, BsmSecret, BsmSnapshot, SelectedBsmSecret } from "./types.js";
+import { selectionAdmits, type ProjectSelection } from "../config.js";
 import type { LogLevel } from "@bitwarden/sdk-napi";
 
 /** Small structural boundary around the official SDK; native SDK types stay outside callers. */
@@ -69,6 +70,16 @@ export function bitwardenSdkAdapter(client: BitwardenClientLike): BsmSdk {
       }));
     },
   };
+  adapter.describeSecrets = async ids => {
+    const rows = await bounded(sdkRows<any>(() => client.secrets().getByIds([...ids])));
+    if (!rows) throw new AdapterError("snapshot_incomplete");
+    if (rows.some(row => !row.id || !row.organizationId || row.projectId === undefined || row.key === undefined)) throw new AdapterError("snapshot_incomplete");
+    // Project membership is only returned with the value. Copy metadata fields only.
+    return rows.map(row => ({
+      id: row.id!, organizationId: row.organizationId!, projectId: row.projectId ?? null, key: row.key!,
+      ...(row.archived === undefined ? {} : { archived: row.archived }),
+    }));
+  };
   if (client.projects) {
     adapter.listProjects = async organizationId => {
       const rows = await bounded(sdkRows<any>(() => client.projects!().list(organizationId)));
@@ -106,22 +117,33 @@ export async function createAuthenticatedBitwardenSdk(token: string, region: "US
   return bitwardenSdkAdapter(client as unknown as BitwardenClientLike);
 }
 
-/** Read all selected source values before exposing a snapshot to diff/apply code. */
+/**
+ * Read the in-scope source values before exposing a snapshot to diff/apply code.
+ * `selection` is a per-project union; a plain Set means whole-project for each ID (legacy).
+ * Values are fetched only for IDs that can still be in scope: with no whole-project entry
+ * and no project hint from the list, only explicitly selected IDs are requested. The SDK list
+ * call returns no project, so whole-project entries must fetch to learn each secret's project.
+ */
 export async function readBsmSnapshot(
   sdk: BsmSdk,
   organizationId: string,
-  selectedProjectIds: ReadonlySet<string>,
+  selection: ReadonlySet<string> | readonly ProjectSelection[],
   batchSize = 100,
 ): Promise<BsmSnapshot> {
-  if (!organizationId || selectedProjectIds.size === 0 || !Number.isInteger(batchSize) || batchSize < 1) {
+  const entries: readonly ProjectSelection[] = selection instanceof Set
+    ? [...selection].map(projectId => ({ projectId, mode: "all" as const })) : selection as readonly ProjectSelection[];
+  if (!organizationId || entries.length === 0 || !Number.isInteger(batchSize) || batchSize < 1) {
     throw new AdapterError("invalid_input");
   }
+  const projectKeys = new Set(entries.map(entry => entry.projectId.toLowerCase()));
+  const hasWholeProject = entries.some(entry => entry.mode === "all");
+  const selectedIds = new Set(entries.flatMap(entry => entry.mode === "selected" ? entry.secretIds.map(id => id.toLowerCase()) : []));
 
   try {
     if (sdk.listProjects) {
       const visibleProjects = await sdk.listProjects(organizationId);
-      const ids = new Set(visibleProjects.filter(project => project.organizationId === organizationId).map(project => project.id));
-      if ([...selectedProjectIds].some(id => !ids.has(id))) throw new AdapterError("snapshot_incomplete");
+      const ids = new Set(visibleProjects.filter(project => project.organizationId === organizationId).map(project => project.id.toLowerCase()));
+      if ([...projectKeys].some(id => !ids.has(id))) throw new AdapterError("snapshot_incomplete");
     }
     const listed = await sdk.listSecretIds(organizationId);
     const seen = new Set<string>();
@@ -133,14 +155,19 @@ export async function readBsmSnapshot(
     }
 
     if (listed.length > 500) throw new AdapterError("snapshot_incomplete");
-    const ids = listed.map(row => row.id);
+    // Filter before fetching values wherever the list metadata permits it.
+    const candidates = listed.filter(row => {
+      if (row.projectId !== undefined) return selectionAdmits(entries, row.projectId, row.id);
+      return hasWholeProject || selectedIds.has(row.id.toLowerCase());
+    });
+    const ids = candidates.map(row => row.id);
     const records: SelectedBsmSecret[] = [];
     let complete = true;
     for (let offset = 0; offset < ids.length; offset += batchSize) {
       const batchIds = ids.slice(offset, offset + batchSize);
       const batch = await sdk.getSecrets(batchIds);
       const byId = new Map(batch.map(secret => [secret.id, secret]));
-      if (byId.size !== batchIds.length || batchIds.some(id => !byId.has(id))) {
+      if (byId.size !== batchIds.length || batchIds.some(id => !byId.has(id)) || batch.some(secret => !batchIds.includes(secret.id))) {
         throw new AdapterError("snapshot_incomplete");
       }
       for (const id of batchIds) {
@@ -152,7 +179,8 @@ export async function readBsmSnapshot(
         if (secret.archived) continue;
         if (secret.projectId === null) continue;
         if (!secret.projectId) throw new AdapterError("snapshot_incomplete");
-        if (!selectedProjectIds.has(secret.projectId)) continue;
+        // The secret's actual project decides; a selected ID that moved elsewhere is out of scope.
+        if (!selectionAdmits(entries, secret.projectId, secret.id)) continue;
         // A listed but unusable value is not evidence of absence. Mark the
         // snapshot partial so callers cannot use it to authorize removals.
         if (!secret.value.trim()) {

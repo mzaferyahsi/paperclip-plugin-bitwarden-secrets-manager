@@ -46,7 +46,18 @@ export interface BsmSecretSummary {
   projectId?: string;
 }
 
+/** Value-free view of a source secret. The adapter drops the value before returning this. */
+export interface BsmSecretMetadata {
+  id: string;
+  organizationId: string;
+  projectId: string | null;
+  key: string;
+  archived?: boolean;
+}
+
 export interface BsmSdk {
+  /** Project membership needs a fetch in the SDK; implementations must discard values in memory. */
+  describeSecrets?(ids: readonly string[]): Promise<readonly BsmSecretMetadata[]>;
   listSecretIds(organizationId: string): Promise<readonly BsmSecretSummary[]>;
   getSecrets(ids: readonly string[]): Promise<readonly BsmSecret[]>;
   listProjects?(organizationId: string): Promise<readonly { id: string; organizationId: string; name?: string }[]>;

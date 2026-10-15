@@ -15,6 +15,7 @@ await build({
 await build({
   entryPoints: ["src/settings-actions.ts"], bundle: true, platform: "node", format: "esm",
   outfile: ".test-build/settings-actions.js", target: "node24", sourcemap: false,
+  external: ["@bitwarden/sdk-napi", "@bitwarden/sdk-napi-linux-x64-gnu"],
 });
 await build({
   entryPoints: ["src/ui/index.tsx"], bundle: true, platform: "node", format: "esm", jsx: "automatic",
@@ -36,5 +37,10 @@ await build({
 await build({
   entryPoints: ["tests/sync.test.ts"], bundle: true, platform: "node", format: "esm",
   outfile: ".test-build/sync.test.mjs", target: "node24", sourcemap: false,
+  external: ["@bitwarden/sdk-napi", "@bitwarden/sdk-napi-linux-x64-gnu"],
+});
+await build({
+  entryPoints: ["tests/selection-sync.test.ts"], bundle: true, platform: "node", format: "esm",
+  outfile: ".test-build/selection-sync.test.mjs", target: "node24", sourcemap: false,
   external: ["@bitwarden/sdk-napi", "@bitwarden/sdk-napi-linux-x64-gnu"],
 });

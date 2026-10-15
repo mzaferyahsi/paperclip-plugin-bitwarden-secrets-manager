@@ -1,7 +1,7 @@
 import { AdapterError, type BsmSnapshot, type BsmSdk, type NativeSecret, type SecretOwnership } from "./adapters/types.js";
 import { readBsmSnapshot } from "./adapters/bitwarden.js";
 import { ownershipMatches, PaperclipSecretsAdapter, sourceIdentityKey } from "./adapters/paperclip.js";
-import type { BsmConfig } from "./config.js";
+import { canonicalSelection, normalizeSelection, selectionAdmits, type BsmConfig, type ProjectSelection } from "./config.js";
 
 const OWNER = "mzaferyahsi.bitwarden-secrets-manager-sync" as const;
 const MAX_SECRETS = 500;
@@ -37,10 +37,18 @@ export type SyncPorts = {
   now?: () => number;
 };
 
-function configFingerprint(config: BsmConfig): string {
+/** Fail closed: an invalid or conflicting selection never widens to the whole organization. */
+function selectionOf(config: BsmConfig): ProjectSelection[] {
+  const result = normalizeSelection(config);
+  if (!result.ok) throw new AdapterError("invalid_input");
+  return result.entries;
+}
+
+function configFingerprint(config: BsmConfig, entries: readonly ProjectSelection[]): string {
   return JSON.stringify({
     organization: config.bsmOrganizationId,
-    projects: [...(config.bsmProjectIds as string[])].sort(),
+    // Whole-project-only scopes keep the pre-selection fingerprint so upgrades do not reset removal evidence.
+    projects: entries.every((e) => e.mode === "all") ? entries.map((e) => e.projectId).sort() : canonicalSelection(entries),
     prefix: config.targetSecretKeyPrefix ?? "bitwarden.",
     sourceRef: (config.bsmAccessToken as { secretId?: string } | undefined)?.secretId ?? null,
   });
@@ -76,6 +84,7 @@ function safeErrorCode(error: unknown): string {
  */
 export async function syncCompany(config: BsmConfig, ports: SyncPorts): Promise<SyncState> {
   const now = ports.now ?? Date.now;
+  const selection = selectionOf(config);
   const previous = (await ports.native.list()).slice();
   const inventoryIds = new Set<string>();
   const inventoryKeys = new Set<string>();
@@ -84,12 +93,12 @@ export async function syncCompany(config: BsmConfig, ports: SyncPorts): Promise<
     inventoryIds.add(row.id);
     inventoryKeys.add(row.key);
   }
-  const fingerprint = configFingerprint(config);
+  const fingerprint = configFingerprint(config, selection);
   const configChanged = ports.stateFingerprint !== undefined && ports.stateFingerprint !== fingerprint;
   if (configChanged) ports.absenceEvidence = {};
   const removalFingerprint = ports.previousState?.removalFingerprint ?? ports.stateFingerprint ?? fingerprint;
   const fingerprintUnchanged = ports.stateFingerprint === fingerprint && removalFingerprint === fingerprint;
-  const snapshot = await readBsmSnapshot(ports.sdk, String(config.bsmOrganizationId), new Set(config.bsmProjectIds as string[]), 100);
+  const snapshot = await readBsmSnapshot(ports.sdk, String(config.bsmOrganizationId), selection, 100);
   if (snapshot.secrets.length > MAX_SECRETS) throw new AdapterError("snapshot_incomplete");
 
   const orgId = String(config.bsmOrganizationId);
@@ -201,12 +210,11 @@ export async function syncCompany(config: BsmConfig, ports: SyncPorts): Promise<
   // Any source/apply error suppresses this pass and does not advance success time.
   if (!budgetExpired && snapshot.complete && !hadFailure && config.archiveOnRemoval === true) {
     const evidence = { ...(configChanged ? {} : ports.absenceEvidence ?? {}) };
-    const selectedProjects = new Set(config.bsmProjectIds as string[]);
     for (const target of owned) {
       const meta = target.providerMetadata as Partial<SecretOwnership>;
       const id = meta.bsmSecretId!;
-      // Shrinking the allowlist is a config migration, never removal evidence.
-      if (!selectedProjects.has(String(meta.bsmProjectId))) continue;
+      // Shrinking the scope (project or individual secret) is a config migration, never removal evidence.
+      if (!selectionAdmits(selection, String(meta.bsmProjectId), id)) continue;
       if (desired.has(id) || target.status !== "active") { delete evidence[id]; continue; }
       const prior = evidence[id];
       const count = prior?.fingerprint === fingerprint ? prior.count + 1 : 1;

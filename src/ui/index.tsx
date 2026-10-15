@@ -36,6 +36,10 @@ export const ERROR_COPY: Record<string, Copy> = {
   settings_invalid: { title: "Settings need a fix", action: "Correct the highlighted field." },
   organization_invalid: { title: "The organization ID is not valid", action: "Enter the Bitwarden organization UUID." },
   project_allowlist_invalid: { title: "A project ID is not valid", action: "Enter one project UUID per line." },
+  project_selection_invalid: { title: "The project selection is not valid", action: "Choose at least one project, and at least one secret for each selected-secrets project." },
+  project_selection_conflict: { title: "Two project lists are set", action: "Save the selection again from this page. It replaces the old list." },
+  secret_selection_invalid: { title: "A selected secret is not in its project", action: "Reload the secret list for that project and tick the secrets again." },
+  selection_unverified: { title: "The selection could not be checked", action: "Nothing was saved. Press Test connection, then save again." },
   sync_interval_invalid: { title: "The interval is not allowed", action: "Choose a value of at least 5 minutes." },
   target_key_prefix_invalid: { title: "The key prefix is not valid", action: "Use letters, digits, dots, dashes or underscores." },
   bitwarden_region_invalid: { title: "The region is not valid", action: "Choose US or EU." },
@@ -73,6 +77,34 @@ export function widgetViewState(workerStatus: string | undefined, loaded: boolea
 }
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export type SelectionEntry = { projectId: string; mode: "all" } | { projectId: string; mode: "selected"; secretIds: string[] };
+/** Legacy `bsmProjectIds` is shown as whole-project entries; saving sends only the new form (explicit migration). */
+export function selectionsFromConfig(config: Record<string, unknown>): { entries: SelectionEntry[]; legacy: boolean } {
+  if (Array.isArray(config.bsmProjectSelections)) return { entries: config.bsmProjectSelections as SelectionEntry[], legacy: false };
+  if (Array.isArray(config.bsmProjectIds)) return { entries: (config.bsmProjectIds as string[]).map((projectId) => ({ projectId, mode: "all" as const })), legacy: true };
+  return { entries: [], legacy: false };
+}
+export function selectionValid(entries: readonly SelectionEntry[]): boolean {
+  const projects = new Set<string>();
+  return entries.length > 0 && entries.every((e) => {
+    const key = e.projectId.toLowerCase();
+    if (!uuid.test(e.projectId) || projects.has(key)) return false;
+    projects.add(key);
+    return e.mode === "all" || (e.mode === "selected" && e.secretIds.length > 0 && e.secretIds.every((id) => uuid.test(id)));
+  });
+}
+export function includeProject(entries: readonly SelectionEntry[], projectId: string): SelectionEntry[] {
+  return entries.some((e) => e.projectId.toLowerCase() === projectId.toLowerCase()) ? [...entries] : [...entries, { projectId, mode: "all" }];
+}
+export function excludeProject(entries: readonly SelectionEntry[], projectId: string): SelectionEntry[] { return entries.filter((e) => e.projectId !== projectId); }
+export function setProjectMode(entries: readonly SelectionEntry[], projectId: string, mode: "all" | "selected"): SelectionEntry[] {
+  return entries.map((e) => e.projectId !== projectId || e.mode === mode ? e : mode === "all" ? { projectId, mode } : { projectId, mode, secretIds: [] });
+}
+export function toggleSecret(entries: readonly SelectionEntry[], projectId: string, secretId: string): SelectionEntry[] {
+  return entries.map((e) => e.projectId !== projectId || e.mode !== "selected" ? e :
+    { ...e, secretIds: e.secretIds.includes(secretId) ? e.secretIds.filter((id) => id !== secretId) : [...e.secretIds, secretId] });
+}
 const vars: React.CSSProperties = { color: "var(--foreground, #17202a)", background: "var(--background, #fff)", fontFamily: "inherit" };
 const css = `
 .bsm{max-width:780px;padding:20px;color:var(--foreground,#17202a);background:var(--background,#fff);font:inherit}
@@ -131,17 +163,23 @@ export function BsmSettingsPage({ context }: { context: { companyId?: string | n
   useEffect(() => { if (message) errorRef.current?.querySelector<HTMLElement>("[role=alert]")?.focus(); }, [message]);
   const companyId = context.companyId;
   useEffect(() => { let alive = true; Promise.all([getStatus({}), getSettings({})]).then(([s,g]) => { if (!alive) return; setStatus(s as Status); const result = g as SettingsResult; if (!result.ok) setLocked(true); else setConfig(result.config ?? {}); }).catch(() => { if (alive) setLocked(true); }).finally(() => { if (alive) setLoaded(true); }); return () => { alive = false; }; }, []);
-  const projects = Array.isArray(config.bsmProjectIds) ? (config.bsmProjectIds as string[]).join("\n") : "";
+  const { entries, legacy } = selectionsFromConfig(config);
+  const setEntries = (next: SelectionEntry[]) => setConfig((c) => { const { bsmProjectIds: _legacy, ...rest } = c; return { ...rest, bsmProjectSelections: next }; });
+  const [found, setFound] = useState<{id:string;name:string|null}[]>([]), [projectSecrets, setProjectSecrets] = useState<Record<string,{id:string;key:string}[]>>({}), [manualProject, setManualProject] = useState("");
   const errors = [status?.errorCode,status?.warningCode].filter(Boolean);
   const valid = !!config.bsmAccessToken && !!config.paperclipApiToken && !!String(config.bsmOrganizationId ?? "").match(uuid) &&
-    (config.bsmProjectIds as unknown[] | undefined)?.length && (config.bsmProjectIds as string[]).every((id) => uuid.test(id)) &&
+    selectionValid(entries) &&
     /^https:\/\//.test(String(config.paperclipApiOrigin ?? ""));
   const change = (key: string, value: unknown) => setConfig((c) => ({ ...c, [key]: value }));
+  const outgoingSettings = () => { const { bsmProjectIds: _legacy, ...rest } = config; return entries.length ? { ...rest, bsmProjectSelections: entries } : rest; };
+  const discover = usePluginAction("discover-secrets");
+  async function discoverProjects() { setBusy(true); setMessage(""); try { const r = await discover({}) as {ok:boolean;errorCode?:string;projects?:{id:string;name:string|null}[]}; if (!r.ok) setMessage(r.errorCode ?? "setup_failed"); else setFound(r.projects ?? []); } catch { setMessage("setup_failed"); } finally { setBusy(false); } }
+  async function loadProjectSecrets(projectId: string) { setBusy(true); setMessage(""); try { const r = await discover({projectId}) as {ok:boolean;errorCode?:string;secrets?:{id:string;key:string}[]|null}; if (!r.ok) setMessage(r.errorCode ?? "setup_failed"); else setProjectSecrets((m) => ({...m,[projectId]:r.secrets ?? []})); } catch { setMessage("setup_failed"); } finally { setBusy(false); } }
   async function save() {
     if (!companyId) { setMessage("Open this page from a company."); return; }
     setBusy(true); setMessage(""); setNotice(""); setFieldError("");
-    try { const result = await saveSettings({ companyId, settings: config }) as {ok:boolean;errorCode?:string;field?:string|null}; if (!result.ok) { setFieldError(result.field ?? ""); setMessage(result.errorCode ?? "setup_failed"); return; }
-      setConfig((c) => ({ ...c, enabled: false })); setStatus((s) => s ? ({...s,enabled:false}) : s); setNotice("Settings saved. Saving turns sync off."); }
+    try { const { bsmProjectIds: _legacy, ...outgoing } = config; const result = await saveSettings({ companyId, settings: { ...outgoing, bsmProjectSelections: entries } }) as {ok:boolean;errorCode?:string;field?:string|null}; if (!result.ok) { setFieldError(result.field ?? ""); setMessage(result.errorCode ?? "setup_failed"); return; }
+      const fresh = await getSettings({}) as SettingsResult; if (fresh.ok) setConfig(fresh.config ?? {}); else setConfig((c) => ({ ...c, enabled: false })); setStatus((s) => s ? ({...s,enabled:false}) : s); setNotice("Settings saved. Saving turns sync off."); }
     catch { setMessage("setup_failed"); } finally { setBusy(false); }
   }
   async function toggle(enabled: boolean) {
@@ -152,13 +190,13 @@ export function BsmSettingsPage({ context }: { context: { companyId?: string | n
   async function replaceToken() {
     if (!companyId || !token.trim()) { setMessage("token_required"); return; }
     setBusy(true); setMessage(""); setNotice("");
-    try { const old = (config.bsmAccessToken as {secretId?:string}|null)?.secretId; const r = await saveToken({companyId,token,operationId:crypto.randomUUID(),settings:config}) as {ok:boolean;errorCode?:string;secret?:{id?:string}};
+    try { const old = (config.bsmAccessToken as {secretId?:string}|null)?.secretId; const r = await saveToken({companyId,token,operationId:crypto.randomUUID(),settings:outgoingSettings()}) as {ok:boolean;errorCode?:string;secret?:{id?:string}};
       if (!r.ok) { setMessage(r.errorCode ?? "setup_failed"); return; }
       const fresh = await getSettings({}) as SettingsResult; if (fresh.ok) setConfig(fresh.config ?? {}); setNotice(old ? `Credential replaced. Previous secret ID: ${old}. Remove it from company secrets when safe. Sync remains off.` : "Credential saved. Sync remains off."); }
     catch { setMessage("setup_failed"); } finally { setToken(""); setBusy(false); }
   }
   async function loadSecrets() { setBusy(true); try { const r = await listSecrets({companyId}) as {ok:boolean;secrets?:{id:string;name:string;provider:string}[];errorCode?:string}; if (!r.ok) setMessage(r.errorCode ?? "setup_failed"); else setSecrets(r.secrets ?? []); } catch { setMessage("setup_failed"); } finally { setBusy(false); } }
-  async function useSecret() { setBusy(true); setMessage(""); setNotice(""); const old=(config.bsmAccessToken as {secretId?:string}|null)?.secretId; try { const r = await selectSecret({companyId,secretId,settings:config}) as {ok:boolean;errorCode?:string}; if (!r.ok) setMessage(r.errorCode ?? "setup_failed"); else { const fresh=await getSettings({}) as SettingsResult; if(fresh.ok)setConfig(fresh.config??{}); setNotice(old && old !== secretId ? `Credential replaced. Previous secret ID: ${old}. Remove it from company secrets when safe. Sync remains off.` : "Credential saved. Sync remains off."); } } catch { setMessage("setup_failed"); } finally { setBusy(false); } }
+  async function useSecret() { setBusy(true); setMessage(""); setNotice(""); const old=(config.bsmAccessToken as {secretId?:string}|null)?.secretId; try { const r = await selectSecret({companyId,secretId,settings:outgoingSettings()}) as {ok:boolean;errorCode?:string}; if (!r.ok) setMessage(r.errorCode ?? "setup_failed"); else { const fresh=await getSettings({}) as SettingsResult; if(fresh.ok)setConfig(fresh.config??{}); setNotice(old && old !== secretId ? `Credential replaced. Previous secret ID: ${old}. Remove it from company secrets when safe. Sync remains off.` : "Credential saved. Sync remains off."); } } catch { setMessage("setup_failed"); } finally { setBusy(false); } }
   if (settingsViewState(loaded, !locked) === "loading") return <main className="bsm" style={vars}><style>{css}</style><h1>Bitwarden Secrets Manager</h1><section aria-label="Loading settings"><div className="skeleton" /><div className="skeleton" /></section></main>;
   if (settingsViewState(loaded, !locked) === "locked") return <main className="bsm" style={vars}><style>{css}</style><h1>Bitwarden Secrets Manager</h1><StatusCard status={status} /><section><strong>Setup credential removed — settings locked (expected)</strong><p>To change settings, ask an instance admin to add the setup credential in the native plugin configuration.</p></section></main>;
   const code = message || errors[0] as string | undefined;
@@ -168,7 +206,7 @@ export function BsmSettingsPage({ context }: { context: { companyId?: string | n
     {errors.map((e) => <ErrorCard key={e} code={e} />)}
     <nav className="steps" aria-label="Setup steps">{[
       {id:"credential",label:"1. Bitwarden credential",done:!!config.bsmAccessToken},
-      {id:"scope",label:"2. Scope",done:!!String(config.bsmOrganizationId??"").match(uuid)&&Array.isArray(config.bsmProjectIds)&&config.bsmProjectIds.length>0&&(config.bsmProjectIds as string[]).every((id)=>uuid.test(id))},
+      {id:"scope",label:"2. Scope",done:!!String(config.bsmOrganizationId??"").match(uuid)&&selectionValid(entries)},
       {id:"paperclip",label:"3. Paperclip access",done:!!config.paperclipApiToken},
       {id:"review",label:"4. Review & enable",done:false},
     ].map((step,index)=><a key={step.id} href={`#${step.id}`} aria-current={activeStep===index+1?"step":undefined} data-done={step.done} onClick={()=>setActiveStep(index+1)}>{step.label}</a>)}</nav>
@@ -180,7 +218,23 @@ export function BsmSettingsPage({ context }: { context: { companyId?: string | n
     </section>
     <section id="scope"><h2>2. Scope</h2><div className="grid">
       <label className="org-field">Organization UUID<input value={String(config.bsmOrganizationId??"")} aria-invalid={fieldError==="bsmOrganizationId"} aria-describedby={fieldError==="bsmOrganizationId"?"org-error":undefined} onChange={(e)=>change("bsmOrganizationId",e.target.value)} />{fieldError==="bsmOrganizationId"&&<small id="org-error">Enter a valid organization UUID.</small>}</label>
-      <label>Project UUIDs, one per line<textarea rows={4} value={projects} aria-invalid={fieldError==="bsmProjectIds"} aria-describedby={fieldError==="bsmProjectIds"?"projects-error":undefined} onChange={(e)=>change("bsmProjectIds",e.target.value.split(/\n/).map(x=>x.trim()).filter(Boolean))} />{fieldError==="bsmProjectIds"&&<small id="projects-error">Enter one valid project UUID per line.</small>}</label>
+      <fieldset className="org-field" aria-describedby={fieldError==="bsmProjectSelections"||fieldError==="bsmProjectIds"?"projects-error":undefined}><legend>Projects and secrets to sync</legend>
+        {legacy&&<p role="note">This setting uses the older project list. It means <strong>all secrets in each project</strong>, including new ones. Saving converts it to the new per-project selection without changing what syncs.</p>}
+        <p>Pick a project, then sync all of its secrets (new ones included) or only the secrets you tick. Nothing outside this list is read for syncing.</p>
+        <button type="button" disabled={busy} onClick={()=>void discoverProjects()}>Find projects</button>
+        {found.length>0&&<ul aria-label="Projects found">{found.map((p)=>{ const on=entries.some((e)=>e.projectId.toLowerCase()===p.id.toLowerCase()); return <li key={p.id}><label className="inline-control"><input type="checkbox" checked={on} onChange={(e)=>setEntries(e.target.checked?includeProject(entries,p.id):excludeProject(entries,p.id))} /> {p.name??"Unnamed project"} · {p.id.slice(0,8)}</label></li>; })}</ul>}
+        <label>Add a project by UUID<input value={manualProject} onChange={(e)=>setManualProject(e.target.value.trim())} /></label>
+        <button type="button" disabled={!uuid.test(manualProject)} onClick={()=>{ setEntries(includeProject(entries,manualProject)); setManualProject(""); }}>Add project</button>
+        {entries.length===0&&<p>No project chosen yet. Choose at least one project.</p>}
+        {entries.map((entry)=><div className="card" key={entry.projectId}><strong>{found.find((p)=>p.id===entry.projectId)?.name??"Project"} · {entry.projectId}</strong>
+          <div className="grid"><label className="radio-option"><input type="radio" name={`mode-${entry.projectId}`} checked={entry.mode==="all"} onChange={()=>setEntries(setProjectMode(entries,entry.projectId,"all"))} />All secrets, including new ones</label>
+          <label className="radio-option"><input type="radio" name={`mode-${entry.projectId}`} checked={entry.mode==="selected"} onChange={()=>setEntries(setProjectMode(entries,entry.projectId,"selected"))} />Only selected secrets</label></div>
+          {entry.mode==="selected"&&<><button type="button" disabled={busy} onClick={()=>void loadProjectSecrets(entry.projectId)}>Load secret names</button>
+            <ul aria-label="Secrets in this project">{[...new Map([...entry.secretIds.map((id)=>[id,{id,key:projectSecrets[entry.projectId]?.find((x)=>x.id===id)?.key??"Selected secret"}] as const),...(projectSecrets[entry.projectId]??[]).map((x)=>[x.id,x] as const)]).values()].map((x)=><li key={x.id}><label className="inline-control"><input type="checkbox" checked={entry.secretIds.includes(x.id)} onChange={()=>setEntries(toggleSecret(entries,entry.projectId,x.id))} /> {x.key} · {x.id.slice(0,8)}</label></li>)}</ul>
+            {entry.secretIds.length===0&&<small>Tick at least one secret, or choose all secrets.</small>}</>}
+          <button type="button" onClick={()=>setEntries(excludeProject(entries,entry.projectId))}>Remove project</button></div>)}
+        {(fieldError==="bsmProjectSelections"||fieldError==="bsmProjectIds")&&<small id="projects-error">Check the project selection: each project needs all secrets or at least one ticked secret.</small>}
+      </fieldset>
       <label>Sync interval (minutes)<input type="number" min={5} value={Number(config.syncIntervalMinutes??15)} onChange={(e)=>change("syncIntervalMinutes",Number(e.target.value))} /></label>
       <label>Target key prefix<input value={String(config.targetSecretKeyPrefix??"bitwarden.")} onChange={(e)=>change("targetSecretKeyPrefix",e.target.value)} /></label>
       <label>Bitwarden region<select value={String(config.bitwardenRegion??"US")} onChange={(e)=>change("bitwardenRegion",e.target.value)}><option>US</option><option>EU</option></select></label>

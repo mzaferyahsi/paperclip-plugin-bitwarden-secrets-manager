@@ -1,15 +1,21 @@
 import type { PluginContext } from "@paperclipai/plugin-sdk";
 import { STATE_KEY } from "./error-codes.js";
-import { isSecretRef, PLUGIN_ID, publicConfig, validateConfig, type BsmConfig, type SecretRef } from "./config.js";
+import { canonicalSelection, isSecretRef, normalizeSelection, PLUGIN_ID, publicConfig, validateConfig, type BsmConfig, type ProjectSelection, type SecretRef } from "./config.js";
+import { createAuthenticatedBitwardenSdk } from "./adapters/bitwarden.js";
+import type { BsmSdk } from "./adapters/types.js";
+
+export type SettingsDependencies = { createSdk?: (token: string, region: "US" | "EU") => Promise<BsmSdk> };
 
 type ActorContext = { actor: { type: string; userId: string | null }; companyId: string | null };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CODE_FIELD: Record<string, string> = {
-  organization_invalid: "bsmOrganizationId", project_allowlist_invalid: "bsmProjectIds", paperclip_origin_invalid: "paperclipApiOrigin",
+  organization_invalid: "bsmOrganizationId", project_allowlist_invalid: "bsmProjectIds", project_selection_invalid: "bsmProjectSelections", project_selection_conflict: "bsmProjectSelections",
+  secret_selection_invalid: "bsmProjectSelections", selection_unverified: "bsmProjectSelections", paperclip_origin_invalid: "paperclipApiOrigin",
   unsupported_destination_scope: "destinationScope", sync_interval_invalid: "syncIntervalMinutes",
   target_key_prefix_invalid: "targetSecretKeyPrefix", bitwarden_region_invalid: "bitwardenRegion",
 };
-const SAFE_FIELDS = ["bsmOrganizationId", "bsmProjectIds", "paperclipApiOrigin", "destinationScope", "syncIntervalMinutes", "targetSecretKeyPrefix", "archiveOnRemoval", "bitwardenRegion"];
+const SELECTION_FIELDS = ["bsmProjectIds", "bsmProjectSelections"];
+const SAFE_FIELDS = ["bsmOrganizationId", "bsmProjectIds", "bsmProjectSelections", "paperclipApiOrigin", "destinationScope", "syncIntervalMinutes", "targetSecretKeyPrefix", "archiveOnRemoval", "bitwardenRegion"];
 
 function userCompany(context: ActorContext, requested?: unknown): string | null {
   if (context.actor.type !== "user" || !context.actor.userId || !context.companyId) return null;
@@ -70,10 +76,11 @@ function rejection(code: string) { return { ok: false, errorCode: code, field: C
 
 function errorCode(error: unknown) {
   const message = error instanceof Error ? error.message : "";
-  return ["setup_credential_required", "setup_credential_rejected", "setup_permission_denied", "setup_identity_mismatch", "paperclip_origin_invalid", "native_request_failed", "config_save_failed", "secret_not_selectable", "token_required", "bsm_credential_required", "paperclip_credential_required", "settings_invalid", "operation_invalid"].includes(message) ? message : "setup_failed";
+  return ["setup_credential_required", "setup_credential_rejected", "setup_permission_denied", "setup_identity_mismatch", "paperclip_origin_invalid", "native_request_failed", "config_save_failed", "secret_not_selectable", "secret_selection_invalid", "selection_unverified", "token_required", "bsm_credential_required", "paperclip_credential_required", "settings_invalid", "operation_invalid"].includes(message) ? message : "setup_failed";
 }
 
-export function registerSettingsActions(ctx: PluginContext) {
+export function registerSettingsActions(ctx: PluginContext, dependencies: SettingsDependencies = {}) {
+  const verify = (config: BsmConfig, old: BsmConfig, token: () => Promise<string>) => verifySelection(dependencies, config, old, token);
   ctx.actions.register("get-settings", async (_params, actionContext) => {
     const companyId = userCompany(actionContext);
     if (!companyId || !actionContext.actor.userId) return { ok: false, errorCode: "user_context_required" };
@@ -112,7 +119,9 @@ export function registerSettingsActions(ctx: PluginContext) {
       const draft = composeConfig(oldConfig, settings, isSecretRef(oldConfig.bsmAccessToken) ? oldConfig.bsmAccessToken : undefined);
       const candidate = { ...draft, bsmAccessToken: draft.bsmAccessToken ?? { type: "secret_ref" as const, secretId: "550e8400-e29b-41d4-a716-446655440000" } };
       const draftError = validateConfig(candidate, false);
-      if (draftError) return { ok: false, errorCode: "settings_invalid" };
+      if (draftError) return { ok: false, errorCode: SELECTION_CODES.has(draftError) ? draftError : "settings_invalid" };
+      const unverified = await verify(draft, oldConfig, async () => tokenValue);
+      if (unverified) return { ok: false, errorCode: unverified };
       const newRef = await createTokenSecret(ctx, origin, token, companyId, params.operationId, tokenValue);
       const nextConfig = composeConfig(oldConfig, settings, newRef);
       const configError = validateConfig(nextConfig, false);
@@ -136,6 +145,8 @@ export function registerSettingsActions(ctx: PluginContext) {
       const nextConfig = composeConfig(oldConfig, settings);
       const invalid = validateConfig(nextConfig, false);
       if (invalid) return rejection(CODE_FIELD[invalid] ? invalid : "settings_invalid");
+      const unverified = await verify(nextConfig, oldConfig, () => ctx.secrets.resolve(nextConfig.bsmAccessToken as SecretRef, { companyId, configPath: "bsmAccessToken" }));
+      if (unverified) return rejection(unverified);
       await saveConfig(ctx, origin, token, companyId, nextConfig);
       return { ok: true, errorCode: null, field: null, enabled: false };
     } catch (error) { return rejection(errorCode(error)); }
@@ -187,11 +198,50 @@ export function registerSettingsActions(ctx: PluginContext) {
       if (version !== "latest" && (!Number.isInteger(version) || version < 1)) return { ok: false, errorCode: "secret_not_selectable" };
       const nextConfig = composeConfig(oldConfig, settings, { type: "secret_ref", secretId: selectedId, version });
       const configError = validateConfig(nextConfig, false);
-      if (configError && configError !== "bsm_credential_required") return { ok: false, errorCode: "settings_invalid" };
+      if (configError && configError !== "bsm_credential_required") return { ok: false, errorCode: SELECTION_CODES.has(configError) ? configError : "settings_invalid" };
+      const unverified = await verify(nextConfig, oldConfig, () => ctx.secrets.resolve(nextConfig.bsmAccessToken as SecretRef, { companyId, configPath: "bsmAccessToken" }));
+      if (unverified) return { ok: false, errorCode: unverified };
       await saveConfig(ctx, origin, token, companyId, nextConfig);
       return { ok: true, secret: { id: selectedId, name: String(selected.name ?? ""), provider: String(selected.provider ?? "unknown") }, enabled: false };
     } catch (error) { return { ok: false, errorCode: errorCode(error) }; }
   });
+}
+
+const SELECTION_CODES = new Set(["project_allowlist_invalid", "project_selection_invalid", "project_selection_conflict"]);
+
+const sameSelection = (a: BsmConfig, b: BsmConfig) => {
+  const left = normalizeSelection(a), right = normalizeSelection(b);
+  return left.ok && right.ok && JSON.stringify(canonicalSelection(left.entries)) === JSON.stringify(canonicalSelection(right.entries));
+};
+
+/**
+ * Selected-secret entries are checked against Bitwarden before they are saved: each ID must exist and
+ * belong to its entry's project. Only the selected IDs are read, in memory; values are dropped by the adapter.
+ * Unverifiable means rejected. Unchanged selections are not re-checked, so token rotation never depends on it.
+ */
+async function verifySelection(dependencies: SettingsDependencies, next: BsmConfig, old: BsmConfig, getToken: () => Promise<string>): Promise<string | null> {
+  const selection = normalizeSelection(next);
+  if (!selection.ok) return selection.code;
+  const selected = selection.entries.filter((e): e is Extract<ProjectSelection, { mode: "selected" }> => e.mode === "selected");
+  if (selected.length === 0 || sameSelection(next, old)) return null;
+  try {
+    const org = String(next.bsmOrganizationId);
+    const sdk = await (dependencies.createSdk ?? createAuthenticatedBitwardenSdk)(await getToken(), next.bitwardenRegion === "EU" ? "EU" : "US");
+    if (!sdk.describeSecrets) return "selection_unverified";
+    if (sdk.listProjects) {
+      const visible = new Set((await sdk.listProjects(org)).filter((p) => p.organizationId === org).map((p) => p.id.toLowerCase()));
+      if (selection.entries.some((e) => !visible.has(e.projectId.toLowerCase()))) return "project_selection_invalid";
+    }
+    const listed = new Set((await sdk.listSecretIds(org)).filter((s) => s.organizationId === org).map((s) => s.id.toLowerCase()));
+    const ids = selected.flatMap((e) => e.secretIds);
+    if (ids.some((id) => !listed.has(id.toLowerCase()))) return "secret_selection_invalid";
+    const described = new Map((await sdk.describeSecrets(ids)).map((m) => [m.id.toLowerCase(), m]));
+    for (const entry of selected) for (const id of entry.secretIds) {
+      const meta = described.get(id.toLowerCase());
+      if (!meta || meta.organizationId !== org || meta.archived || meta.projectId?.toLowerCase() !== entry.projectId.toLowerCase()) return "secret_selection_invalid";
+    }
+    return null;
+  } catch { return "selection_unverified"; }
 }
 
 function pickSettings(input: unknown): Record<string, unknown> {
@@ -205,8 +255,16 @@ function pickSettings(input: unknown): Record<string, unknown> {
 function composeConfig(existing: BsmConfig, settings: Record<string, unknown>, bsmRef?: SecretRef): BsmConfig {
   const safe: BsmConfig = { enabled: false, destinationScope: "company" };
   for (const field of SAFE_FIELDS) {
+    if (SELECTION_FIELDS.includes(field)) continue;
     if (Object.hasOwn(settings, field)) safe[field] = settings[field];
     else if (Object.hasOwn(existing, field)) safe[field] = existing[field];
+  }
+  // Scope: the form named in the request wins and the other is dropped (explicit migration).
+  // Submitting both is kept as-is so validation rejects the conflict instead of picking one.
+  const requested = SELECTION_FIELDS.filter((field) => Object.hasOwn(settings, field));
+  for (const field of requested.length ? requested : SELECTION_FIELDS) {
+    const source = requested.length ? settings : existing;
+    if (Object.hasOwn(source, field)) safe[field] = source[field];
   }
   if (isSecretRef(existing.paperclipApiToken)) safe.paperclipApiToken = { ...existing.paperclipApiToken };
   if (isSecretRef(existing.paperclipSetupApiToken)) safe.paperclipSetupApiToken = { ...existing.paperclipSetupApiToken };
