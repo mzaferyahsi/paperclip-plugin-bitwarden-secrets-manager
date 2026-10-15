@@ -94,16 +94,17 @@ export function selectionValid(entries: readonly SelectionEntry[]): boolean {
     return e.mode === "all" || (e.mode === "selected" && e.secretIds.length > 0 && e.secretIds.every((id) => uuid.test(id)));
   });
 }
+const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 export function includeProject(entries: readonly SelectionEntry[], projectId: string): SelectionEntry[] {
-  return entries.some((e) => e.projectId.toLowerCase() === projectId.toLowerCase()) ? [...entries] : [...entries, { projectId, mode: "all" }];
+  return entries.some((e) => same(e.projectId, projectId)) ? [...entries] : [...entries, { projectId: projectId.toLowerCase(), mode: "all" }];
 }
-export function excludeProject(entries: readonly SelectionEntry[], projectId: string): SelectionEntry[] { return entries.filter((e) => e.projectId !== projectId); }
-export function setProjectMode(entries: readonly SelectionEntry[], projectId: string, mode: "all" | "selected"): SelectionEntry[] {
-  return entries.map((e) => e.projectId !== projectId || e.mode === mode ? e : mode === "all" ? { projectId, mode } : { projectId, mode, secretIds: [] });
+export function excludeProject(entries: readonly SelectionEntry[], projectId: string): SelectionEntry[] { return entries.filter((e) => !same(e.projectId, projectId)); }
+export function setProjectMode(entries: readonly SelectionEntry[], projectId: string, mode: "all" | "selected", restoreIds: readonly string[] = []): SelectionEntry[] {
+  return entries.map((e) => !same(e.projectId, projectId) || e.mode === mode ? e : mode === "all" ? { projectId: e.projectId, mode } : { projectId: e.projectId, mode, secretIds: [...restoreIds] });
 }
 export function toggleSecret(entries: readonly SelectionEntry[], projectId: string, secretId: string): SelectionEntry[] {
-  return entries.map((e) => e.projectId !== projectId || e.mode !== "selected" ? e :
-    { ...e, secretIds: e.secretIds.includes(secretId) ? e.secretIds.filter((id) => id !== secretId) : [...e.secretIds, secretId] });
+  return entries.map((e) => !same(e.projectId, projectId) || e.mode !== "selected" ? e :
+    { ...e, secretIds: e.secretIds.some((id) => same(id, secretId)) ? e.secretIds.filter((id) => !same(id, secretId)) : [...e.secretIds, secretId.toLowerCase()] });
 }
 const vars: React.CSSProperties = { color: "var(--foreground, #17202a)", background: "var(--background, #fff)", fontFamily: "inherit" };
 const css = `
@@ -112,7 +113,7 @@ const css = `
 .bsm label{display:grid;gap:6px;margin:12px 0}.bsm input,.bsm textarea,.bsm select{width:100%;max-width:560px;min-height:42px;padding:9px 11px;border:1px solid var(--border,#596579);border-radius:6px;background:var(--background,#fff);color:var(--foreground,#17202a);font:inherit}
 .bsm button,.bsm a,.bsm .radio-option{min-height:42px;display:inline-flex;align-items:center;padding:8px 12px;border-radius:6px;font:inherit}
 .bsm button{border:1px solid var(--border,#596579);background:var(--background,#fff);color:var(--foreground,#17202a);cursor:pointer}.bsm button:disabled{opacity:.55;cursor:not-allowed}
-.bsm .inline-control{display:inline-flex;align-items:center;gap:10px}.bsm .inline-control input{width:24px;height:24px;min-height:24px;max-width:none;padding:0;margin:0;flex:0 0 24px}.bsm .grid{align-items:start}.bsm .org-field{grid-column:1/-1;min-width:0}.bsm .org-field input{min-width:0;font:12px ui-monospace,SFMono-Regular,Menlo,monospace}.bsm .radio-option{gap:8px;flex:1;border:1px solid var(--border,#596579);cursor:pointer}.bsm .radio-option input{width:18px;height:18px;min-height:18px;max-width:none;padding:0;margin:0}
+.bsm .uuid{display:block;overflow-wrap:anywhere;opacity:.8}.bsm fieldset{min-width:0}.bsm h3{margin:0;font-size:1.05em}.bsm .inline-control{display:inline-flex;align-items:center;gap:10px}.bsm .inline-control input{width:24px;height:24px;min-height:24px;max-width:none;padding:0;margin:0;flex:0 0 24px}.bsm .grid{align-items:start}.bsm .org-field{grid-column:1/-1;min-width:0}.bsm .org-field input{min-width:0;font:12px ui-monospace,SFMono-Regular,Menlo,monospace}.bsm .radio-option{gap:8px;flex:1;border:1px solid var(--border,#596579);cursor:pointer}.bsm .radio-option input{width:18px;height:18px;min-height:18px;max-width:none;padding:0;margin:0}
 .bsm :focus-visible{outline:3px solid var(--focus,#245bcc);outline-offset:2px}.bsm .badge{display:inline-block;border:1px solid currentColor;border-radius:99px;padding:4px 10px;font-weight:700}
 .bsm .steps a[aria-current=step]{border-color:var(--focus,#245bcc);box-shadow:inset 0 -3px var(--focus,#245bcc);font-weight:700}.bsm .steps a[data-done=true]:before{content:"✓ ";font-weight:700}
 .bsm .sync-switch{position:relative;width:48px!important;height:28px!important;min-height:28px!important;flex:0 0 48px!important;appearance:none;border:2px solid var(--border,#596579)!important;border-radius:99px!important;background:var(--muted,#e4e8ed)!important;cursor:pointer;transition:background .15s,border-color .15s}.bsm .sync-switch:before{content:"";position:absolute;width:20px;height:20px;left:2px;top:2px;border-radius:50%;background:var(--background,#fff);box-shadow:0 1px 3px #0005;transition:transform .15s}.bsm .sync-switch:checked{background:var(--accent,#245bcc)!important;border-color:var(--accent,#245bcc)!important}.bsm .sync-switch:checked:before{transform:translateX(20px)}.bsm .sync-switch:disabled{cursor:not-allowed}
@@ -165,7 +166,9 @@ export function BsmSettingsPage({ context }: { context: { companyId?: string | n
   useEffect(() => { let alive = true; Promise.all([getStatus({}), getSettings({})]).then(([s,g]) => { if (!alive) return; setStatus(s as Status); const result = g as SettingsResult; if (!result.ok) setLocked(true); else setConfig(result.config ?? {}); }).catch(() => { if (alive) setLocked(true); }).finally(() => { if (alive) setLoaded(true); }); return () => { alive = false; }; }, []);
   const { entries, legacy } = selectionsFromConfig(config);
   const setEntries = (next: SelectionEntry[]) => setConfig((c) => { const { bsmProjectIds: _legacy, ...rest } = c; return { ...rest, bsmProjectSelections: next }; });
-  const [found, setFound] = useState<{id:string;name:string|null}[]>([]), [projectSecrets, setProjectSecrets] = useState<Record<string,{id:string;key:string}[]>>({}), [manualProject, setManualProject] = useState("");
+  const [found, setFound] = useState<{id:string;name:string|null}[]>([]), [projectSecrets, setProjectSecrets] = useState<Record<string,{id:string;key:string}[]>>({}), [manualProject, setManualProject] = useState(""), [stash, setStash] = useState<Record<string,string[]>>({}), [discovered, setDiscovered] = useState(false), [loadedSecrets, setLoadedSecrets] = useState<Record<string,boolean>>({}), [scopeNote, setScopeNote] = useState(""), scopeRef = useRef<HTMLHeadingElement>(null);
+  const manualValid = uuid.test(manualProject), manualDuplicate = manualValid && entries.some((e) => same(e.projectId, manualProject));
+  const canDiscover = !!config.bsmAccessToken && !!String(config.bsmOrganizationId ?? "").match(uuid);
   const errors = [status?.errorCode,status?.warningCode].filter(Boolean);
   const valid = !!config.bsmAccessToken && !!config.paperclipApiToken && !!String(config.bsmOrganizationId ?? "").match(uuid) &&
     selectionValid(entries) &&
@@ -173,8 +176,9 @@ export function BsmSettingsPage({ context }: { context: { companyId?: string | n
   const change = (key: string, value: unknown) => setConfig((c) => ({ ...c, [key]: value }));
   const outgoingSettings = () => { const { bsmProjectIds: _legacy, ...rest } = config; return entries.length ? { ...rest, bsmProjectSelections: entries } : rest; };
   const discover = usePluginAction("discover-secrets");
-  async function discoverProjects() { setBusy(true); setMessage(""); try { const r = await discover({}) as {ok:boolean;errorCode?:string;projects?:{id:string;name:string|null}[]}; if (!r.ok) setMessage(r.errorCode ?? "setup_failed"); else setFound(r.projects ?? []); } catch { setMessage("setup_failed"); } finally { setBusy(false); } }
-  async function loadProjectSecrets(projectId: string) { setBusy(true); setMessage(""); try { const r = await discover({projectId}) as {ok:boolean;errorCode?:string;secrets?:{id:string;key:string}[]|null}; if (!r.ok) setMessage(r.errorCode ?? "setup_failed"); else setProjectSecrets((m) => ({...m,[projectId]:r.secrets ?? []})); } catch { setMessage("setup_failed"); } finally { setBusy(false); } }
+  useEffect(() => { const next = entries.find((e) => e.mode === "selected" && !loadedSecrets[e.projectId.toLowerCase()]); if (next && !busy && loaded && !locked) void loadProjectSecrets(next.projectId); });
+  async function discoverProjects() { setBusy(true); setMessage(""); try { const r = await discover({}) as {ok:boolean;errorCode?:string;projects?:{id:string;name:string|null}[]}; if (!r.ok) setMessage(r.errorCode ?? "setup_failed"); else { setFound(r.projects ?? []); setDiscovered(true); } } catch { setMessage("setup_failed"); } finally { setBusy(false); } }
+  async function loadProjectSecrets(projectId: string) { setLoadedSecrets((m) => ({...m,[projectId.toLowerCase()]:true})); setBusy(true); setMessage(""); try { const r = await discover({projectId}) as {ok:boolean;errorCode?:string;secrets?:{id:string;key:string}[]|null}; if (!r.ok) setMessage(r.errorCode ?? "setup_failed"); else setProjectSecrets((m) => ({...m,[projectId.toLowerCase()]:r.secrets ?? []})); } catch { setMessage("setup_failed"); } finally { setBusy(false); } }
   async function save() {
     if (!companyId) { setMessage("Open this page from a company."); return; }
     setBusy(true); setMessage(""); setNotice(""); setFieldError("");
@@ -216,23 +220,26 @@ export function BsmSettingsPage({ context }: { context: { companyId?: string | n
       {mode==="enter" ? <label>Machine-account token<input type="password" autoComplete="new-password" value={token} onChange={(e)=>setToken(e.target.value)} aria-describedby="token-help" /><small id="token-help">A replacement token is stored as an encrypted company secret.</small></label> : <><button type="button" disabled={busy} onClick={()=>void loadSecrets()}>Load secret metadata</button><label>Existing secret<select value={secretId} onChange={(e)=>setSecretId(e.target.value)}><option value="">Select an active secret</option>{secrets.map((s)=><option key={s.id} value={s.id}>{s.name} · {s.provider} · {s.id.slice(0,8)}</option>)}</select></label><button type="button" disabled={busy||!secretId} onClick={()=>void useSecret()}>Use selected secret</button></>}
       {mode==="enter"&&<><button type="button" aria-describedby={!token.trim()?"save-credential-hint":undefined} disabled={busy||!token.trim()} onClick={()=>void replaceToken()}>Save credential</button>{!token.trim()&&<small id="save-credential-hint">Enter a token first.</small>}</>}
     </section>
-    <section id="scope"><h2>2. Scope</h2><div className="grid">
+    <section id="scope"><h2 ref={scopeRef} tabIndex={-1}>2. Scope</h2><div className="grid">
       <label className="org-field">Organization UUID<input value={String(config.bsmOrganizationId??"")} aria-invalid={fieldError==="bsmOrganizationId"} aria-describedby={fieldError==="bsmOrganizationId"?"org-error":undefined} onChange={(e)=>change("bsmOrganizationId",e.target.value)} />{fieldError==="bsmOrganizationId"&&<small id="org-error">Enter a valid organization UUID.</small>}</label>
       <fieldset className="org-field" aria-describedby={fieldError==="bsmProjectSelections"||fieldError==="bsmProjectIds"?"projects-error":undefined}><legend>Projects and secrets to sync</legend>
         {legacy&&<p role="note">This setting uses the older project list. It means <strong>all secrets in each project</strong>, including new ones. Saving converts it to the new per-project selection without changing what syncs.</p>}
         <p>Pick a project, then sync all of its secrets (new ones included) or only the secrets you tick. Nothing outside this list is read for syncing.</p>
-        <button type="button" disabled={busy} onClick={()=>void discoverProjects()}>Find projects</button>
-        {found.length>0&&<ul aria-label="Projects found">{found.map((p)=>{ const on=entries.some((e)=>e.projectId.toLowerCase()===p.id.toLowerCase()); return <li key={p.id}><label className="inline-control"><input type="checkbox" checked={on} onChange={(e)=>setEntries(e.target.checked?includeProject(entries,p.id):excludeProject(entries,p.id))} /> {p.name??"Unnamed project"} · {p.id.slice(0,8)}</label></li>; })}</ul>}
-        <label>Add a project by UUID<input value={manualProject} onChange={(e)=>setManualProject(e.target.value.trim())} /></label>
-        <button type="button" disabled={!uuid.test(manualProject)} onClick={()=>{ setEntries(includeProject(entries,manualProject)); setManualProject(""); }}>Add project</button>
+        <button type="button" disabled={busy||!canDiscover} aria-describedby="find-hint" onClick={()=>void discoverProjects()}>Find projects</button><small id="find-hint">Uses the saved credential and organization. Save the credential first.</small>
+        <div role="status" aria-live="polite">{discovered&&(found.length===0?"No projects found for this organization and credential.":`${found.length} project${found.length===1?"":"s"} found.`)}</div>
+        {found.length>0&&<ul aria-label="Projects found">{found.map((p)=>{ const on=entries.some((e)=>same(e.projectId,p.id)); return <li key={p.id}><label className="inline-control"><input type="checkbox" checked={on} onChange={(e)=>setEntries(e.target.checked?includeProject(entries,p.id):excludeProject(entries,p.id))} /> {p.name??"Unnamed project"} · {p.id.slice(0,8)}</label></li>; })}</ul>}
+        <label>Add a project by UUID<input value={manualProject} aria-invalid={manualProject!==""&&!manualValid} aria-describedby="manual-hint" onChange={(e)=>setManualProject(e.target.value.trim())} /><small id="manual-hint">{manualProject===""?"":!manualValid?"Enter a project UUID (36 characters).":manualDuplicate?"Already added.":""}</small></label>
+        <button type="button" disabled={!manualValid||manualDuplicate} onClick={()=>{ setEntries(includeProject(entries,manualProject)); setManualProject(""); }}>Add project</button>
         {entries.length===0&&<p>No project chosen yet. Choose at least one project.</p>}
-        {entries.map((entry)=><div className="card" key={entry.projectId}><strong>{found.find((p)=>p.id===entry.projectId)?.name??"Project"} · {entry.projectId}</strong>
-          <div className="grid"><label className="radio-option"><input type="radio" name={`mode-${entry.projectId}`} checked={entry.mode==="all"} onChange={()=>setEntries(setProjectMode(entries,entry.projectId,"all"))} />All secrets, including new ones</label>
-          <label className="radio-option"><input type="radio" name={`mode-${entry.projectId}`} checked={entry.mode==="selected"} onChange={()=>setEntries(setProjectMode(entries,entry.projectId,"selected"))} />Only selected secrets</label></div>
-          {entry.mode==="selected"&&<><button type="button" disabled={busy} onClick={()=>void loadProjectSecrets(entry.projectId)}>Load secret names</button>
-            <ul aria-label="Secrets in this project">{[...new Map([...entry.secretIds.map((id)=>[id,{id,key:projectSecrets[entry.projectId]?.find((x)=>x.id===id)?.key??"Selected secret"}] as const),...(projectSecrets[entry.projectId]??[]).map((x)=>[x.id,x] as const)]).values()].map((x)=><li key={x.id}><label className="inline-control"><input type="checkbox" checked={entry.secretIds.includes(x.id)} onChange={()=>setEntries(toggleSecret(entries,entry.projectId,x.id))} /> {x.key} · {x.id.slice(0,8)}</label></li>)}</ul>
+        {entries.map((entry)=>{ const key=entry.projectId.toLowerCase(); const name=found.find((p)=>same(p.id,entry.projectId))?.name??"Project"; const list=projectSecrets[key]; const ids=entry.mode==="selected"?entry.secretIds:[]; const known=new Set((list??[]).map((x)=>x.id.toLowerCase()));
+          return <div className="card" key={key}><fieldset><legend><h3>{name}</h3><small className="uuid">{entry.projectId}</small></legend>
+          <div className="grid"><label className="radio-option"><input type="radio" name={`mode-${key}`} checked={entry.mode==="all"} onChange={()=>{ if(entry.mode==="selected") setStash((m)=>({...m,[key]:entry.secretIds})); setEntries(setProjectMode(entries,entry.projectId,"all")); }} />All secrets, including new ones</label>
+          <label className="radio-option"><input type="radio" name={`mode-${key}`} checked={entry.mode==="selected"} onChange={()=>setEntries(setProjectMode(entries,entry.projectId,"selected",stash[key]??[]))} />Only selected secrets</label></div>
+          {entry.mode==="selected"&&<><button type="button" disabled={busy} onClick={()=>void loadProjectSecrets(entry.projectId)}>Reload secret names</button>
+            <div role="status" aria-live="polite">{busy&&!list?"Loading secret names…":list&&list.length===0?"This project has no secrets.":""}</div>
+            <ul aria-label={`Secrets in ${name}`}>{[...new Map([...ids.map((id)=>[id.toLowerCase(),{id,key:list?.find((x)=>same(x.id,id))?.key??"Selected secret"}] as const),...(list??[]).map((x)=>[x.id.toLowerCase(),x] as const)]).values()].map((x)=>{ const missing=!!list&&!known.has(x.id.toLowerCase()); return <li key={x.id.toLowerCase()}><label className="inline-control"><input type="checkbox" checked={ids.some((id)=>same(id,x.id))} onChange={()=>setEntries(toggleSecret(entries,entry.projectId,x.id))} /> {x.key} · {x.id.slice(0,8)}{missing&&<small> Not found in this project. Untick it.</small>}</label></li>; })}</ul>
             {entry.secretIds.length===0&&<small>Tick at least one secret, or choose all secrets.</small>}</>}
-          <button type="button" onClick={()=>setEntries(excludeProject(entries,entry.projectId))}>Remove project</button></div>)}
+          <button type="button" aria-label={`Remove project ${name}`} onClick={()=>{ setEntries(excludeProject(entries,entry.projectId)); setTimeout(()=>scopeRef.current?.focus(),0); }}>Remove project</button></fieldset></div>; })}
         {(fieldError==="bsmProjectSelections"||fieldError==="bsmProjectIds")&&<small id="projects-error">Check the project selection: each project needs all secrets or at least one ticked secret.</small>}
       </fieldset>
       <label>Sync interval (minutes)<input type="number" min={5} value={Number(config.syncIntervalMinutes??15)} onChange={(e)=>change("syncIntervalMinutes",Number(e.target.value))} /></label>

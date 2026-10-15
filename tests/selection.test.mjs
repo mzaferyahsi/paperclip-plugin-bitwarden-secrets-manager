@@ -271,3 +271,15 @@ test("QA blocker: a loopback http origin is rejected by shipped origin validatio
   const r = await h.actions["get-settings"]({}, actor);
   assert.deepEqual([r.ok, r.errorCode], [false, "paperclip_origin_invalid"]);
 });
+
+test("UI selection helpers are case-insensitive and mode switch is lossless", () => {
+  const U = "550E8400-E29B-41D4-A716-446655440021", S = "550E8400-E29B-41D4-A716-446655440031";
+  let e = ui.includeProject([], U);
+  assert.equal(e[0].projectId, U.toLowerCase());
+  assert.deepEqual(ui.setProjectMode(e, U, "selected", [S.toLowerCase()])[0].secretIds, [S.toLowerCase()]);
+  e = ui.setProjectMode(e, U, "selected");
+  e = ui.toggleSecret(e, U, S);
+  assert.deepEqual(e[0].secretIds, [S.toLowerCase()]);
+  assert.deepEqual(ui.toggleSecret(e, U.toLowerCase(), S.toLowerCase())[0].secretIds, []);
+  assert.deepEqual(ui.excludeProject(e, U.toLowerCase()), []);
+});
