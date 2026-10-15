@@ -7,7 +7,7 @@ import { AUTHORIZATION_BLOCKED } from "./error-codes.js";
 import { syncCompany, type SyncState } from "./sync.js";
 import type { BsmSdk } from "./adapters/types.js";
 
-const STATE_KEY = "runtime";
+import { STATE_KEY } from "./error-codes.js";
 const RUN_BUDGET_MS = 4 * 60_000;
 const MAX_COMPANIES = 500;
 const COMPANY_PAGE_SIZE = 100;

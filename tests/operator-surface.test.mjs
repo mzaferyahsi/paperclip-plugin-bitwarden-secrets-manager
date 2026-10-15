@@ -23,7 +23,9 @@ function harness(initial = full, identity = { userId: "user-a", isInstanceAdmin:
   const actions = {};
   const store = { config: { ...initial } };
   const writes = [];
+  const stateMap = new Map();
   const ctx = {
+    state: { get: async (k) => stateMap.get(k.scopeId + "/" + k.stateKey) ?? null, set: async (k, v) => { stateMap.set(k.scopeId + "/" + k.stateKey, v); } },
     actions: { register: (key, fn) => { actions[key] = fn; } },
     config: { get: async () => store.config },
     secrets: { resolve: async () => "fixture-setup-credential" },
@@ -35,7 +37,7 @@ function harness(initial = full, identity = { userId: "user-a", isInstanceAdmin:
     } },
   };
   registerSettingsActions(ctx);
-  return { actions, store, writes };
+  return { actions, store, writes, stateMap };
 }
 
 for (const [name, params] of [["save-settings", { companyId, settings }], ["set-enabled", { companyId, enabled: true }]]) {
@@ -212,4 +214,39 @@ test("settings state fails closed and widget exposes all required presentation s
   assert.equal(ui.widgetViewState("available", true, { configured: true, enabled: true, status: "success" }).state, "healthy");
   assert.equal(ui.widgetViewState("available", true, { configured: true, enabled: true, status: "partial" }).state, "error");
   assert.equal(ui.widgetViewState("denied", true).state, "unavailable");
+});
+
+const blocked = { errorCode: "bsm_credential_rejected", nextEligibleAt: "2999-01-01T00:00:00.000Z", runtimeRefIds: [bsmRef.secretId, runtimeRef.secretId], scheduledAnchor: "2026-01-01T00:00:00.000Z", lastRunSummary: { ok: 1 } };
+const key = `${companyId}/runtime`;
+
+test("enabling from off re-arms a blocked state and keeps the rest", async () => {
+  const h = harness();
+  h.stateMap.set(key, { ...blocked });
+  assert.equal((await h.actions["set-enabled"]({ companyId, enabled: false }, actor)).ok, true);
+  assert.deepEqual(h.stateMap.get(key), blocked);
+  assert.equal((await h.actions["set-enabled"]({ companyId, enabled: true }, actor)).ok, true);
+  const { errorCode, nextEligibleAt, ...kept } = blocked;
+  assert.deepEqual(h.stateMap.get(key), kept);
+});
+
+test("enabling an already-enabled config leaves state unchanged", async () => {
+  const h = harness({ ...full, enabled: true });
+  h.stateMap.set(key, { ...blocked });
+  assert.equal((await h.actions["set-enabled"]({ companyId, enabled: true }, actor)).ok, true);
+  assert.deepEqual(h.stateMap.get(key), blocked);
+});
+
+test("refused or unauthorised enable leaves state unchanged", async () => {
+  const bad = harness({ ...full, bsmProjectIds: [] });
+  bad.stateMap.set(key, { ...blocked });
+  assert.equal((await bad.actions["set-enabled"]({ companyId, enabled: true }, actor)).ok, false);
+  assert.deepEqual(bad.stateMap.get(key), blocked);
+  const nonAdmin = harness(full, { userId: "user-a", isInstanceAdmin: false, companyIds: [companyId] });
+  nonAdmin.stateMap.set(key, { ...blocked });
+  assert.equal((await nonAdmin.actions["set-enabled"]({ companyId, enabled: true }, actor)).ok, false);
+  assert.deepEqual(nonAdmin.stateMap.get(key), blocked);
+  const noUser = harness();
+  noUser.stateMap.set(key, { ...blocked });
+  assert.equal((await noUser.actions["set-enabled"]({ companyId, enabled: true }, { actor: { type: "agent", userId: null }, companyId })).ok, false);
+  assert.deepEqual(noUser.stateMap.get(key), blocked);
 });

@@ -1,4 +1,5 @@
 import type { PluginContext } from "@paperclipai/plugin-sdk";
+import { STATE_KEY } from "./error-codes.js";
 import { isSecretRef, PLUGIN_ID, publicConfig, validateConfig, type BsmConfig, type SecretRef } from "./config.js";
 
 type ActorContext = { actor: { type: string; userId: string | null }; companyId: string | null };
@@ -156,6 +157,15 @@ export function registerSettingsActions(ctx: PluginContext) {
       const nextConfig = composeConfig(oldConfig, {});
       nextConfig.enabled = params.enabled;
       await saveConfig(ctx, origin, token, companyId, nextConfig);
+      if (params.enabled && oldConfig.enabled !== true) {
+        // Enabling is the operator re-arm: drop a stale block so the next run retries.
+        const scope = { scopeKind: "company" as const, scopeId: companyId, stateKey: STATE_KEY };
+        const prior = await ctx.state.get(scope) as Record<string, unknown> | null;
+        if (prior && (prior.errorCode !== undefined || prior.nextEligibleAt !== undefined)) {
+          const { errorCode: _e, nextEligibleAt: _n, ...rest } = prior;
+          await ctx.state.set(scope, rest);
+        }
+      }
       return { ok: true, errorCode: null, field: null, enabled: params.enabled };
     } catch (error) { return rejection(errorCode(error)); }
   });

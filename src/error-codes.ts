@@ -51,3 +51,4 @@ export const AUTHORIZATION_BLOCKED: ReadonlySet<string> = new Set([
   "paperclip_credential_expired_or_revoked", "paperclip_permission_denied", "configuration_required",
   "bsm_credential_rejected", "bsm_permission_denied",
 ]);
+export const STATE_KEY = "runtime";

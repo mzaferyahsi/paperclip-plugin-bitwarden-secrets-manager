@@ -12,15 +12,15 @@ type SettingsResult = { ok: boolean; config?: Config; errorCode?: string };
 type Copy = { title: string; action: string };
 
 export const ERROR_COPY: Record<string, Copy> = {
-  paperclip_credential_expired_or_revoked: { title: "Paperclip rejected the runtime credential", action: "Replace the runtime credential in the native plugin config." },
+  paperclip_credential_expired_or_revoked: { title: "Paperclip rejected the runtime credential", action: "Replace the runtime credential in the native plugin config. After you fix it, turn sync off and on again to resume. Replacing the secret resumes sync automatically." },
   paperclip_credential_required: { title: "The Paperclip runtime credential is missing", action: "Set the runtime credential in the native plugin config (step 3)." },
   bsm_credential_required: { title: "The Bitwarden credential is missing", action: "Open step 1 and add the machine-account token." },
-  bsm_credential_rejected: { title: "Bitwarden rejected the machine-account token", action: "Replace the Bitwarden token (step 1)." },
-  bsm_permission_denied: { title: "The Bitwarden machine account lacks access", action: "Give it read access to the selected projects." },
-  paperclip_permission_denied: { title: "The Paperclip credential lacks permission", action: "Check the runtime credential's access." },
+  bsm_credential_rejected: { title: "Bitwarden rejected the machine-account token", action: "Replace the Bitwarden token (step 1). After you fix it, turn sync off and on again to resume. Replacing the secret resumes sync automatically." },
+  bsm_permission_denied: { title: "The Bitwarden machine account lacks access", action: "Give it read access to the selected projects. After you fix it, turn sync off and on again to resume. Replacing the secret resumes sync automatically." },
+  paperclip_permission_denied: { title: "The Paperclip credential lacks permission", action: "Check the runtime credential's access. After you fix it, turn sync off and on again to resume. Replacing the secret resumes sync automatically." },
   identity_mismatch: { title: "The runtime credential belongs to another identity", action: "Use the credential created for this plugin." },
-  configuration_required: { title: "Settings need a fix", action: "Correct the highlighted field." },
-  credential_cooldown: { title: "Sync is paused after a credential error", action: "Fix the credential; sync resumes on the next run." },
+  configuration_required: { title: "Settings need a fix", action: "Correct the highlighted field. After you fix it, turn sync off and on again to resume. Replacing the secret resumes sync automatically." },
+  credential_cooldown: { title: "Sync is paused after a credential error", action: "After you fix it, turn sync off and on again to resume. Replacing the secret resumes sync automatically." },
   ownership_mismatch: { title: "A secret with this key or name exists but is not owned by the plugin", action: "Nothing was changed. Rename or remove the other secret." },
   paperclip_rate_limited: { title: "Paperclip is rate-limiting sync", action: "Nothing to do; sync retries automatically." },
   remote_unavailable: { title: "Bitwarden or Paperclip cannot be reached", action: "Nothing to do; check the provider status page if it continues." },
@@ -154,8 +154,8 @@ export function BsmSettingsPage({ context }: { context: { companyId?: string | n
     setBusy(true); setMessage(""); setNotice("");
     try { const old = (config.bsmAccessToken as {secretId?:string}|null)?.secretId; const r = await saveToken({companyId,token,operationId:crypto.randomUUID(),settings:config}) as {ok:boolean;errorCode?:string;secret?:{id?:string}};
       if (!r.ok) { setMessage(r.errorCode ?? "setup_failed"); return; }
-      setToken(""); const fresh = await getSettings({}) as SettingsResult; if (fresh.ok) setConfig(fresh.config ?? {}); setNotice(old ? `Credential replaced. Previous secret ID: ${old}. Remove it from company secrets when safe. Sync remains off.` : "Credential saved. Sync remains off."); }
-    catch { setMessage("setup_failed"); } finally { setBusy(false); }
+      const fresh = await getSettings({}) as SettingsResult; if (fresh.ok) setConfig(fresh.config ?? {}); setNotice(old ? `Credential replaced. Previous secret ID: ${old}. Remove it from company secrets when safe. Sync remains off.` : "Credential saved. Sync remains off."); }
+    catch { setMessage("setup_failed"); } finally { setToken(""); setBusy(false); }
   }
   async function loadSecrets() { setBusy(true); try { const r = await listSecrets({companyId}) as {ok:boolean;secrets?:{id:string;name:string;provider:string}[];errorCode?:string}; if (!r.ok) setMessage(r.errorCode ?? "setup_failed"); else setSecrets(r.secrets ?? []); } catch { setMessage("setup_failed"); } finally { setBusy(false); } }
   async function useSecret() { setBusy(true); setMessage(""); setNotice(""); const old=(config.bsmAccessToken as {secretId?:string}|null)?.secretId; try { const r = await selectSecret({companyId,secretId,settings:config}) as {ok:boolean;errorCode?:string}; if (!r.ok) setMessage(r.errorCode ?? "setup_failed"); else { const fresh=await getSettings({}) as SettingsResult; if(fresh.ok)setConfig(fresh.config??{}); setNotice(old && old !== secretId ? `Credential replaced. Previous secret ID: ${old}. Remove it from company secrets when safe. Sync remains off.` : "Credential saved. Sync remains off."); } } catch { setMessage("setup_failed"); } finally { setBusy(false); } }
