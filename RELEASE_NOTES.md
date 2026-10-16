@@ -1,21 +1,25 @@
-# v0.1.1 release notes
+# v0.1.2 release notes
 
 ## Summary
-Operator surface rebuild plus fail-closed scope handling. **Real Bitwarden sync is intentionally unavailable on SDK 1.0.0** (see below).
+Real sync is available on SDK 1.0.0. The plugin now reads all secrets, groups them by project, and syncs the ones you select: all secrets, whole projects, individual secrets, or a mix.
+
+## Important: organisation secret values pass through worker memory (intentional)
+The Bitwarden SDK 1.0.0 `secrets().list` call returns no project. `getByIds` returns the project together with the value. To group secrets by project, discovery and every sync run therefore read the value of **every** secret in the organisation into the plugin worker's memory. The board decided this on 2026-10-17 (ALR-1698). It replaces the earlier rule "never read a value outside the selected scope". Nothing else is relaxed:
+- Each value is dropped as soon as its batch is classified. Only ids, key names and project ids are kept for the catalogue.
+- Values never go to the UI, state, config, logs, activity or error text.
+- Only selected secrets are written to Paperclip native secrets.
+- Loading the catalogue needs the same setup authority as changing settings.
 
 ## Changes
-- Rebuilt settings page: stepper, enable switch, status overview, error-code messages (ALR-1421, ALR-1501).
-- Scope model `bsmProjectSelections` (whole-project or selected secret IDs per project). Legacy `bsmProjectIds` still read as whole-project; saving migrates it. Both forms together are rejected.
-- Selected IDs are verified against list metadata on save (no value read).
-- Enabling a blocked company re-arms sync; the token input clears after save.
-- Rate-limit backoff helper, scheduled-anchor preservation fix, unset-scope status no longer shows a spurious error.
-- Version 0.1.1 in package, lockfile, manifest and Bitwarden user agent.
+- Settings page: "Load secrets" builds a grouped, collapsible list (project, counts, key names only). Choose All secrets, whole projects, individual secrets, or a mix. A "No project" group holds secrets with no project. A summary shows "N secrets from M projects" before Save. Secrets whose project Bitwarden does not report are listed as not selectable.
+- Sync reads every listed secret when the list carries no project, keeps only secrets the selection admits, and re-checks the selection every run. A selected project that no longer exists stops the run with `selected_project_missing` and changes nothing.
+- Removal rules are unchanged: an incomplete snapshot (including any secret with an unreadable project) never authorizes a removal, and narrowing the selection never archives.
+- Removed: the `project_membership_unavailable` fail-closed limitation and the "no scope syncs" text. Added `secret_limit_exceeded` for more than 500 secrets.
+- Version 0.1.2 in package, lockfile, manifest and Bitwarden user agent.
 
-## Known limitation (fail-closed)
-The SDK list call returns no project per secret. Membership is only returned with values. The plugin refuses to read values to learn it, so every scope fails with `project_membership_unavailable` before any value request. No secret is created, rotated, archived or deleted by a sync run. Documented in README and in the Scope step of the settings UI.
+## Verification
+Unit tests (grouping, mixed selection, No project, missing projectId, 500 cap, no value in any UI payload, state or write). A packed install on the QA host with a stub SDK is run by QA before tagging. No real Bitwarden account test has been done.
 
-## Tag plan (not executed)
-1. Security review (Vin) and QA verdict (Szeth) on the final diff.
-2. Merge `release/v0.1.1` to `main` by PR.
-3. Tag `v0.1.1` on the merge commit; `npm pack` and attach the tarball. Publish only on explicit board approval.
-4. Follow-up: when the SDK lists project membership (ALR-1664), release 0.1.2 enabling sync, with a disposable-destination check first.
+## Release plan
+1. Value-handling review (Vin), grouped-selection UI review (Shai), acceptance on the packed build with a stub SDK (Szeth/Marasi).
+2. Merge to `main`, tag `v0.1.2`, GitHub release with the tarball attached. No npm publish. Licence unchanged.

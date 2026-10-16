@@ -1,6 +1,6 @@
 import type { PluginContext } from "@paperclipai/plugin-sdk";
 import { STATE_KEY } from "./error-codes.js";
-import { canonicalSelection, isSecretRef, normalizeSelection, PLUGIN_ID, publicConfig, validateConfig, type BsmConfig, type ProjectSelection, type SecretRef } from "./config.js";
+import { canonicalSelection, isRealProject, isSecretRef, normalizeSelection, PLUGIN_ID, publicConfig, validateConfig, type BsmConfig, type ProjectSelection, type SecretRef } from "./config.js";
 import { createAuthenticatedBitwardenSdk } from "./adapters/bitwarden.js";
 import type { BsmSdk } from "./adapters/types.js";
 
@@ -55,7 +55,7 @@ function itemsOf(payload: unknown): Record<string, unknown>[] {
   return [];
 }
 
-async function authorizedSetup(ctx: PluginContext, companyId: string, actorUserId: string, config: BsmConfig) {
+export async function authorizedSetup(ctx: PluginContext, companyId: string, actorUserId: string, config: BsmConfig) {
   if (!isSecretRef(config.paperclipSetupApiToken)) throw new Error("setup_credential_required");
   const origin = apiOrigin(config);
   if (!origin) throw new Error("paperclip_origin_invalid");
@@ -74,7 +74,7 @@ function originChangeRefused(existing: BsmConfig, settings: Record<string, unkno
 
 function rejection(code: string) { return { ok: false, errorCode: code, field: CODE_FIELD[code] ?? null }; }
 
-function errorCode(error: unknown) {
+export function errorCode(error: unknown) {
   const message = error instanceof Error ? error.message : "";
   return ["setup_credential_required", "setup_credential_rejected", "setup_permission_denied", "setup_identity_mismatch", "paperclip_origin_invalid", "native_request_failed", "config_save_failed", "secret_not_selectable", "secret_selection_invalid", "selection_unverified", "token_required", "bsm_credential_required", "paperclip_credential_required", "settings_invalid", "operation_invalid"].includes(message) ? message : "setup_failed";
 }
@@ -216,9 +216,8 @@ const sameSelection = (a: BsmConfig, b: BsmConfig) => {
 
 /**
  * Selected-secret entries are checked against Bitwarden metadata before they are saved: each project must be
- * visible and each ID must be listed. No secret value is read. Project membership is not available as
- * metadata on the current SDK, so selected and whole-project sync both fail closed before any value read
- * (project_membership_unavailable). With membership metadata, sync rejects out-of-project IDs before fetching.
+ * visible and each ID must be listed. No secret value is read here (sync re-validates and reads values itself).
+ * The "All secrets" and "No project" stand-ins are not real projects and skip the project check.
  * Unverifiable means rejected. Unchanged selections are not re-checked, so token rotation never depends on it.
  */
 async function verifySelection(dependencies: SettingsDependencies, next: BsmConfig, old: BsmConfig, getToken: () => Promise<string>): Promise<string | null> {
@@ -231,7 +230,7 @@ async function verifySelection(dependencies: SettingsDependencies, next: BsmConf
     const sdk = await (dependencies.createSdk ?? createAuthenticatedBitwardenSdk)(await getToken(), next.bitwardenRegion === "EU" ? "EU" : "US");
     if (sdk.listProjects) {
       const visible = new Set((await sdk.listProjects(org)).filter((p) => p.organizationId === org).map((p) => p.id.toLowerCase()));
-      if (selection.entries.some((e) => !visible.has(e.projectId.toLowerCase()))) return "project_selection_invalid";
+      if (selection.entries.some((e) => isRealProject(e.projectId) && !visible.has(e.projectId.toLowerCase()))) return "project_selection_invalid";
     }
     const listed = new Set((await sdk.listSecretIds(org)).filter((s) => s.organizationId === org).map((s) => s.id.toLowerCase()));
     if (selected.flatMap((e) => e.secretIds).some((id) => !listed.has(id.toLowerCase()))) return "secret_selection_invalid";

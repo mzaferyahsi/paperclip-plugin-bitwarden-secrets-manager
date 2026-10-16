@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { normalizeSelection, selectionAdmits, validateConfig } from "../src/config.ts";
-import { readBsmSnapshot, bitwardenSdkAdapter } from "../.test-build/bitwarden-adapter.mjs";
+import { ALL_SECRETS_ID, NO_PROJECT_ID, normalizeSelection, selectionAdmits, validateConfig } from "../src/config.ts";
+import { readBsmSnapshot, bitwardenSdkAdapter, discoverCatalogue } from "../.test-build/bitwarden-adapter.mjs";
 import { registerSettingsActions } from "../.test-build/settings-actions.js";
 import { registerOverviewActions, buildOverview } from "../.test-build/overview.js";
 import { buildStatus } from "../.test-build/runtime.js";
@@ -110,10 +110,13 @@ test("an SDK that returns rows that were not requested fails closed", async () =
     (e) => e?.name === "AdapterError" && e.code === "snapshot_incomplete");
 });
 
-test("a selected project that the token cannot see is an incomplete snapshot, not an empty scope", async () => {
+test("a selected project that the token cannot see fails closed with a typed code, not an empty scope", async () => {
   const { sdk } = sdkFixture();
   sdk.listProjects = async () => [{ id: P1, organizationId: org }];
-  await assert.rejects(() => readBsmSnapshot(sdk, org, [{ projectId: P2, mode: "all" }]), (e) => e.code === "snapshot_incomplete");
+  await assert.rejects(() => readBsmSnapshot(sdk, org, [{ projectId: P2, mode: "all" }]), (e) => e.code === "selected_project_missing");
+  await assert.rejects(() => readBsmSnapshot(sdk, org, [{ projectId: P2, mode: "selected", secretIds: [S3] }]), (e) => e.code === "selected_project_missing");
+  // "All secrets" and "No project" are not real projects: they never need to be listed.
+  assert.equal((await readBsmSnapshot(sdk, org, [{ projectId: ALL_SECRETS_ID, mode: "all" }])).secrets.length, 4);
 });
 
 test("the adapter exposes no value-reading discovery path", () => {
@@ -121,20 +124,50 @@ test("the adapter exposes no value-reading discovery path", () => {
   assert.equal(adapter.describeSecrets, undefined);
 });
 
-test("whole-project fails closed without reading any value when the list carries no project", async () => {
+test("without list metadata every value is read, only admitted ones are kept, and unreadable projects are unselectable", async () => {
   const { sdk, fetched } = sdkFixture({ hints: false });
-  await assert.rejects(() => readBsmSnapshot(sdk, org, [{ projectId: P1, mode: "all" }]), (e) => e.code === "project_membership_unavailable");
-  await assert.rejects(() => readBsmSnapshot(sdk, org, new Set([P1])), (e) => e.code === "project_membership_unavailable");
-  await assert.rejects(() => readBsmSnapshot(sdk, org, [{ projectId: P1, mode: "selected", secretIds: [S1] }, { projectId: P2, mode: "all" }]), (e) => e.code === "project_membership_unavailable");
-  assert.deepEqual(fetched, [], "no value fetch happened");
-  // Selected mode needs membership before any value request too: unknown membership fails closed with zero reads.
-  await assert.rejects(() => readBsmSnapshot(sdk, org, [{ projectId: P1, mode: "selected", secretIds: [S1] }]), (e) => e.code === "project_membership_unavailable");
-  assert.deepEqual(fetched, [], "selected mode with unknown membership read no value");
-  // With membership metadata (future SDK), only IDs listed in the chosen project are fetched.
-  const withHints = sdkFixture({ hints: true });
-  const selectedOnly = await readBsmSnapshot(withHints.sdk, org, [{ projectId: P1, mode: "selected", secretIds: [S1] }]);
-  assert.deepEqual(withHints.fetched, [[S1]], "selected-only reads only the chosen ID");
-  assert.deepEqual(ids(selectedOnly), [S1]);
+  assert.deepEqual(ids(await readBsmSnapshot(sdk, org, [{ projectId: P1, mode: "all" }])), [S1, S2]);
+  assert.deepEqual(ids(await readBsmSnapshot(sdk, org, new Set([P1]))), [S1, S2]);
+  assert.deepEqual(ids(await readBsmSnapshot(sdk, org, [{ projectId: P1, mode: "selected", secretIds: [S1] }, { projectId: P2, mode: "all" }])), [S1, S3]);
+  assert.deepEqual(fetched[0].sort(), [S1, S2, S3, S4].sort(), "all values are read when the list has no project");
+  const all = await readBsmSnapshot(sdk, org, [{ projectId: ALL_SECRETS_ID, mode: "all" }]);
+  assert.deepEqual(ids(all), [S1, S2, S3, S4]);
+  // Kept records are only the admitted ones: nothing else survives the batch.
+  const kept = JSON.stringify(await readBsmSnapshot(sdk, org, [{ projectId: P1, mode: "selected", secretIds: [S1] }]));
+  for (const other of ["value-two-SECRET", "value-three-SECRET", "value-four-SECRET"]) assert.equal(kept.includes(other), false);
+  // No project: its own group, selectable as a whole or by id. Missing project: skipped and incomplete.
+  const rows = { [S1]: null, [S2]: undefined, [S3]: P2 };
+  const odd = { listSecretIds: async () => Object.keys(rows).map((sid) => ({ id: sid, organizationId: org })),
+    getSecrets: async (want) => want.map((sid) => ({ id: sid, organizationId: org, ...(rows[sid] === undefined ? {} : { projectId: rows[sid] }), key: "K", value: VALUES[sid], revisionDate: "2026-10-10T00:00:00Z" })) };
+  const none = await readBsmSnapshot(odd, org, [{ projectId: NO_PROJECT_ID, mode: "all" }]);
+  assert.deepEqual([ids(none), none.secrets[0].projectId, none.complete, none.skippedCount], [[S1], NO_PROJECT_ID, false, 1]);
+  const everything = await readBsmSnapshot(odd, org, [{ projectId: ALL_SECRETS_ID, mode: "all" }]);
+  assert.deepEqual([ids(everything), everything.complete], [[S1, S3], false], "unreadable project is never guessed or synced");
+});
+
+test("the 500-secret cap fails closed for sync and for discovery", async () => {
+  const many = Array.from({ length: 501 }, (_, n) => ({ id: `s-${n}`, organizationId: org }));
+  let reads = 0;
+  const sdk = { listSecretIds: async () => many, getSecrets: async () => { reads++; return []; } };
+  await assert.rejects(() => readBsmSnapshot(sdk, org, [{ projectId: ALL_SECRETS_ID, mode: "all" }]), (e) => e.code === "snapshot_incomplete");
+  await assert.rejects(() => discoverCatalogue(sdk, org), (e) => e.code === "secret_limit_exceeded");
+  assert.equal(reads, 0);
+  const exactly = Array.from({ length: 500 }, (_, n) => ({ id: `s-${n}`, organizationId: org }));
+  const ok = { listSecretIds: async () => exactly, getSecrets: async (want) => want.map((sid) => ({ id: sid, organizationId: org, projectId: P1, key: sid, value: "v", revisionDate: "r" })) };
+  assert.equal((await discoverCatalogue(ok, org)).secrets.length, 500);
+});
+
+test("discoverCatalogue groups by project, names them, adds a No project group and flags unreadable projects; values never escape", async () => {
+  const rows = { [S1]: P1, [S2]: P1, [S3]: null, [S4]: undefined };
+  const sdk = { listProjects: async () => [{ id: P1, organizationId: org, name: "Alpha" }, { id: P2, organizationId: org, name: "Empty" }],
+    listSecretIds: async () => Object.keys(rows).map((sid) => ({ id: sid, organizationId: org })),
+    getSecrets: async (want) => want.map((sid) => ({ id: sid, organizationId: org, ...(rows[sid] === undefined ? {} : { projectId: rows[sid] }), key: `KEY_${sid.slice(-2)}`, value: VALUES[sid], revisionDate: "r" })) };
+  const catalogue = await discoverCatalogue(sdk, org, 2);
+  assert.deepEqual(catalogue.projects, [{ id: P1, name: "Alpha", secretCount: 2 }, { id: P2, name: "Empty", secretCount: 0 }, { id: NO_PROJECT_ID, name: null, secretCount: 1 }]);
+  assert.deepEqual(catalogue.secrets.map((s) => [s.id, s.projectId]), [[S1, P1], [S2, P1], [S3, NO_PROJECT_ID]]);
+  assert.deepEqual(catalogue.unselectable, [{ id: S4, key: "KEY_34" }]);
+  assert.equal(JSON.stringify(catalogue).includes("SECRET"), false);
+  for (const row of [...catalogue.secrets, ...catalogue.unselectable]) assert.deepEqual(Object.keys(row).filter((k) => k === "value"), []);
 });
 
 // ---- settings actions ----
@@ -242,35 +275,73 @@ test("save-token and select-secret reject a conflicting or invalid selection sup
   assert.equal(h.writes.length, 0);
 });
 
-test("discovery returns project names and secret keys/IDs only, never values; get-status exposes no scope detail", async () => {
+test("discover-secrets returns a value-free catalogue, requires setup authority, and get-status exposes no scope detail", async () => {
   const h = harness({ ...stored, bsmProjectSelections: [{ projectId: P1, mode: "selected", secretIds: [S1] }] });
-  const projects = await h.actions["discover-secrets"]({}, actor);
-  assert.equal(projects.ok, true); assert.equal(projects.secrets, null);
-  const detail = await h.actions["discover-secrets"]({ projectId: P1 }, actor);
-  assert.deepEqual([detail.ok, detail.errorCode], [false, "project_membership_unavailable"]);
-  for (const reply of [projects, detail]) assert.equal(JSON.stringify(reply).includes("SECRET"), false);
-  assert.equal((await h.actions["discover-secrets"]({ projectId: id(77) }, actor)).errorCode, "project_selection_invalid");
-  assert.equal((await h.actions["discover-secrets"]({ projectId: "nope" }, actor)).errorCode, "invalid_input");
+  const reply = await h.actions["discover-secrets"]({}, actor);
+  assert.equal(reply.ok, true);
+  assert.deepEqual(reply.projects.map((p) => [p.id, p.secretCount]), [[P1, 2], [P2, 1], [P3, 1]]);
+  assert.equal(reply.secrets.length, 4);
+  assert.equal(JSON.stringify(reply).includes("SECRET"), false, "no value in the UI payload");
+  assert.equal(JSON.stringify([...h.stateMap.values(), ...h.writes]).includes("SECRET"), false, "no value in state or config");
+  const noAdmin = harness({ ...stored }, { identity: { userId: "user-a", isInstanceAdmin: false, companyIds: [companyId] } });
+  assert.deepEqual([(await noAdmin.actions["discover-secrets"]({}, actor)).ok], [false]);
   const config = { ...stored, enabled: true, bsmProjectSelections: [{ projectId: P1, mode: "selected", secretIds: [S1] }, { projectId: P2, mode: "all" }] };
   const status = JSON.stringify(buildStatus(config, { status: "success", lastRunSummary: { sourceCount: 1, created: 1, rotated: 0, nativeDriftCorrected: 0, metadataUpdated: 0, unchanged: 0, archived: 0, skippedArchived: 0, failed: 0 } }));
   for (const needle of [P1, P2, S1, "Name-", "KEY_", "SECRET", "bsmProjectSelections"]) assert.equal(status.includes(needle), false, needle);
 });
 
 // ---- UI helpers ----
-test("UI helpers: legacy shows as whole-project; toggles keep the contract; invalid states are detectable", () => {
+test("UI helpers: legacy shows as whole-project; project, secret and all-secrets toggles keep the contract", () => {
   assert.deepEqual(ui.selectionsFromConfig({ bsmProjectIds: [P1] }), { entries: [{ projectId: P1, mode: "all" }], legacy: true });
-  let e = ui.includeProject([], P1);
-  e = ui.setProjectMode(e, P1, "selected");
-  assert.equal(ui.selectionValid(e), false, "selected with nothing ticked");
-  e = ui.toggleSecret(e, P1, S1);
-  assert.equal(ui.selectionValid(e), true);
-  e = ui.toggleSecret(e, P1, S1);
-  assert.equal(ui.selectionValid(e), false);
-  e = ui.setProjectMode(ui.toggleSecret(e, P1, S1), P1, "all");
-  assert.deepEqual(e, [{ projectId: P1, mode: "all" }]);
-  assert.equal(ui.selectionValid(ui.excludeProject(e, P1)), false);
-  assert.equal(ui.selectionValid(ui.includeProject(ui.includeProject([], P1), P1.toUpperCase())), true, "include is idempotent");
+  assert.equal(ui.selectionValid([]), false);
+  let e = ui.toggleSecret([], P1, S1);
+  assert.deepEqual(e, [{ projectId: P1, mode: "selected", secretIds: [S1] }]);
+  e = ui.toggleSecret(e, P1, S2);
+  assert.deepEqual(e[0].secretIds, [S1, S2]);
+  e = ui.toggleSecret(ui.toggleSecret(e, P1, S1), P1, S2);
+  assert.deepEqual(e, [], "unticking the last secret drops the entry");
+  e = ui.toggleProject(ui.toggleSecret([], P1, S1), P1);
+  assert.deepEqual(e, [{ projectId: P1, mode: "all" }], "whole project replaces its individual picks");
+  assert.deepEqual(ui.toggleSecret(e, P1, S2), e, "secrets of a whole project are locked on");
+  assert.equal(ui.secretChecked(e, P1.toUpperCase(), S2), true);
+  e = ui.toggleSecret(e.concat(), P2, S3);
+  assert.equal(ui.selectionValid(e), true, "mixed: a whole project plus an extra individual secret");
+  assert.deepEqual(ui.toggleProject(e, P1), [{ projectId: P2, mode: "selected", secretIds: [S3] }]);
+  const all = ui.setAllSecrets(e, true);
+  assert.deepEqual([ui.allSecretsSelected(all), ui.selectionValid(all)], [true, true]);
+  assert.deepEqual(ui.toggleProject(all, P1), all, "nothing toggles while All secrets is on");
+  assert.deepEqual(ui.setAllSecrets(all, false), []);
+  assert.equal(ui.selectionValid([...all, { projectId: P1, mode: "all" }]), false, "All secrets cannot mix with other entries");
   assert.deepEqual(ui.copyCoverage(), []);
+});
+
+const CATALOGUE = {
+  projects: [{ id: P1, name: "Alpha", secretCount: 2 }, { id: P2, name: null, secretCount: 1 }, { id: NO_PROJECT_ID, name: null, secretCount: 1 }],
+  secrets: [{ id: S1, key: "A_ONE", projectId: P1 }, { id: S2, key: "A_TWO", projectId: P1 }, { id: S3, key: "B_ONE", projectId: P2 }, { id: S4, key: "LOOSE", projectId: NO_PROJECT_ID }],
+  unselectable: [{ id: id(35), key: "MYSTERY" }],
+};
+test("selection summary counts secrets and projects against the catalogue", () => {
+  assert.deepEqual(ui.selectionSummary([], CATALOGUE), { secrets: 0, projects: 0, unknown: 0 });
+  assert.deepEqual(ui.selectionSummary([{ projectId: P1, mode: "all" }, { projectId: P2, mode: "selected", secretIds: [S3, id(99)] }], CATALOGUE), { secrets: 3, projects: 2, unknown: 1 });
+  assert.deepEqual(ui.selectionSummary([{ projectId: NO_PROJECT_ID, mode: "selected", secretIds: [S4] }], CATALOGUE), { secrets: 1, projects: 1, unknown: 0 });
+  assert.deepEqual(ui.selectionSummary(ui.setAllSecrets([], true), CATALOGUE), { secrets: 4, projects: 3, unknown: 0 });
+  assert.deepEqual(ui.selectionSummary([{ projectId: P1, mode: "all" }], null), { secrets: null, projects: null, unknown: 0 });
+});
+
+test("grouped tree: collapsible groups, counts, key names only, a No project group and an unselectable note", async () => {
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const React = (await import("react")).default;
+  const render = (entries) => renderToStaticMarkup(React.createElement(ui.SecretTree, { catalogue: CATALOGUE, entries, onChange() {} }));
+  const html = render([{ projectId: P1, mode: "all" }, { projectId: NO_PROJECT_ID, mode: "selected", secretIds: [S4] }]);
+  assert.match(html, /Alpha/); assert.match(html, /No project/); assert.match(html, /Project 550e8400/);
+  assert.match(html, /2 secrets · 2 selected/); assert.match(html, /1 secret · 1 selected/);
+  assert.match(html, /aria-expanded="false"/); assert.match(html, /aria-controls="secrets-/);
+  assert.match(html, /hidden=""/, "groups start collapsed");
+  assert.match(html, /A_ONE/); assert.match(html, /LOOSE/);
+  assert.match(html, /Whole project selected, including secrets added to it later/);
+  assert.match(html, /1 secret cannot be selected/); assert.match(html, /MYSTERY/);
+  assert.match(html, /disabled=""[^>]*\/?>/, "secrets of a whole project are locked");
+  for (const v of Object.values(VALUES)) assert.equal(html.includes(v), false);
 });
 
 // ---- QA contract blocker (reproduction) ----
@@ -283,70 +354,10 @@ test("QA blocker: a loopback http origin is rejected by shipped origin validatio
   assert.deepEqual([r.ok, r.errorCode], [false, "paperclip_origin_invalid"]);
 });
 
-test("UI selection helpers are case-insensitive and mode switch is lossless", () => {
-  const U = "550E8400-E29B-41D4-A716-446655440021", S = "550E8400-E29B-41D4-A716-446655440031";
-  let e = ui.includeProject([], U);
-  assert.equal(e[0].projectId, U.toLowerCase());
-  assert.deepEqual(ui.setProjectMode(e, U, "selected", [S.toLowerCase()])[0].secretIds, [S.toLowerCase()]);
-  e = ui.setProjectMode(e, U, "selected");
-  e = ui.toggleSecret(e, U, S);
-  assert.deepEqual(e[0].secretIds, [S.toLowerCase()]);
-  assert.deepEqual(ui.toggleSecret(e, U.toLowerCase(), S.toLowerCase())[0].secretIds, []);
-  assert.deepEqual(ui.excludeProject(e, U.toLowerCase()), []);
-});
-
 // ---- Manual secret-ID selection (ALR-1545) ----
-test("manual secret IDs: add, remove, case, duplicate, invalid and empty feedback", () => {
-  const U = "550E8400-E29B-41D4-A716-446655440021", S = "550E8400-E29B-41D4-A716-446655440031";
-  let e = ui.includeProject([], U, "selected");
-  assert.deepEqual(e, [{ projectId: U.toLowerCase(), mode: "selected", secretIds: [] }], "new project starts in selected mode, empty");
-  assert.equal(ui.selectionValid(e), false, "empty selected state is not saveable");
-  assert.equal(ui.checkSecretId(e, U, ""), "empty");
-  assert.equal(ui.checkSecretId(e, U, "   "), "empty");
-  assert.equal(ui.checkSecretId(e, U, "not-a-uuid"), "invalid");
-  assert.equal(ui.checkSecretId(e, U, S), "ok");
-  assert.deepEqual(ui.addSecret(e, U, "bad"), e, "invalid add is a no-op");
-  e = ui.addSecret(e, U, ` ${S} `);
-  assert.deepEqual(e[0].secretIds, [S.toLowerCase()], "trimmed and stored lowercase");
-  assert.equal(ui.checkSecretId(e, U.toLowerCase(), S.toLowerCase()), "duplicate", "case variants are duplicates");
-  assert.equal(ui.addSecret(e, U, S.toLowerCase())[0].secretIds.length, 1);
-  assert.equal(ui.selectionValid(e), true);
-  assert.equal(ui.selectionValid(ui.removeSecret(e, U.toLowerCase(), S)), false, "removing the last one makes it unsaveable");
-  assert.deepEqual(ui.addSecret([{ projectId: U.toLowerCase(), mode: "all" }], U, S), [{ projectId: U.toLowerCase(), mode: "all" }], "no add in whole-project mode");
-});
-
-test("manual secret IDs: mode switch is lossless and the saved form reloads unchanged", () => {
-  const sel = [{ projectId: P1, mode: "selected", secretIds: [S1, S2] }, { projectId: P2, mode: "all" }];
-  const { entries, legacy } = ui.selectionsFromConfig({ bsmProjectSelections: sel });
-  assert.deepEqual(entries, sel); assert.equal(legacy, false);
-  const asAll = ui.setProjectMode(entries, P1, "all");
-  assert.deepEqual(asAll[0], { projectId: P1, mode: "all" });
-  assert.deepEqual(ui.setProjectMode(asAll, P1, "selected", [S1, S2])[0].secretIds, [S1, S2]);
-  assert.deepEqual(ui.selectionsFromConfig({ bsmProjectIds: [P1] }).entries, [{ projectId: P1, mode: "all" }], "legacy stays whole-project; no implicit migration to selected");
-});
-
-test("manual secret IDs: editor renders labels, feedback and honest membership wording", async () => {
-  const { renderToStaticMarkup } = await import("react-dom/server");
-  const React = (await import("react")).default;
-  const entries = [{ projectId: P1, mode: "selected", secretIds: [S1] }, { projectId: P2, mode: "selected", secretIds: [] }];
-  const html = (i) => renderToStaticMarkup(React.createElement(ui.SecretIdEditor, { entry: entries[i], entries, name: "Prod", onChange() {} }));
-  const filled = html(0), empty = html(1);
-  assert.match(filled, /Add a secret by UUID/);
-  assert.match(filled, new RegExp(`aria-label="Remove secret ${S1} from Prod"`));
-  assert.match(filled, /aria-label="Secrets selected in Prod"/);
-  assert.match(filled, /not checked against the project when you save/);
-  assert.match(filled, /sync is not available for this project and nothing is read/);
-  assert.doesNotMatch(filled, /skips any|checks each secret at run time/i, "no false usable-sync claim");
-  assert.match(empty, /No secrets chosen for Prod\. Add at least one secret UUID before saving\./);
-  assert.doesNotMatch(filled + empty, /Reload secret|Load secret names|Find secrets|verified in this project/i, "no unsupported discovery controls");
-  assert.match(filled, /<button[^>]*disabled=""[^>]*>Add secret<\/button>/, "Add is disabled while the field is empty");
-});
-
-test("UI copy: whole-project limitation and unsupported discovery are stated honestly", () => {
-  const e = ui.errorCopy("project_membership_unavailable");
-  assert.match(e.title, /not available/i);
-  assert.match(e.action, /selected and whole-project/i);
-  assert.match(e.action, /nothing was read/i);
-  assert.doesNotMatch(ui.errorCopy("secret_selection_invalid").action, /reload|tick/i);
+test("UI copy: new codes are covered and plain; the old limitation text is gone", () => {
+  assert.match(ui.errorCopy("selected_project_missing").action, /Nothing was synced or removed/);
+  assert.match(ui.errorCopy("secret_limit_exceeded").title, /500/);
+  assert.equal(ui.errorCopy("project_membership_unavailable").title, "Something went wrong", "retired code");
   assert.deepEqual(ui.copyCoverage(), []);
 });

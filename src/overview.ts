@@ -1,9 +1,10 @@
 import type { PluginContext } from "@paperclipai/plugin-sdk";
-import { isSecretRef, normalizeSelection, validateConfig, type BsmConfig } from "./config.js";
-import { createAuthenticatedBitwardenSdk } from "./adapters/bitwarden.js";
+import { isRealProject, isSecretRef, normalizeSelection, validateConfig, type BsmConfig } from "./config.js";
+import { createAuthenticatedBitwardenSdk, discoverCatalogue } from "./adapters/bitwarden.js";
 import type { BsmSdk } from "./adapters/types.js";
 import type { SyncCounts } from "./sync.js";
 import { describeCode } from "./messages.js";
+import { authorizedSetup, errorCode as setupErrorCode } from "./settings-actions.js";
 import { AUTHORIZATION_BLOCKED } from "./error-codes.js";
 
 type ActorContext = { actor: { type: string; userId: string | null }; companyId: string | null };
@@ -122,7 +123,7 @@ export function registerOverviewActions(ctx: PluginContext, dependencies: Overvi
       for (const project of visible) if (selected.has(project.id) && project.name) names[project.id] = project.name;
       const prior = (await ctx.state.get(scope(companyId)) ?? {}) as StoredState;
       await ctx.state.set(scope(companyId), { ...prior, projectNames: { ...(prior.projectNames ?? {}), ...names } });
-      const missing = [...selected].filter((id) => !visible.some((p) => p.id === id));
+      const missing = [...selected].filter((id) => isRealProject(id) && !visible.some((p) => p.id.toLowerCase() === id.toLowerCase()));
       return {
         ok: true, projectCount: visible.length, secretCount: secrets.length,
         projects: visible.map((p) => ({ id: p.id, name: p.name ?? null, selected: selected.has(p.id) })),
@@ -132,27 +133,26 @@ export function registerOverviewActions(ctx: PluginContext, dependencies: Overvi
     } catch (error) { return fail((error as { name?: string; code?: unknown })?.name === "AdapterError" && typeof (error as { code?: unknown }).code === "string" ? (error as { code: string }).code : "remote_unavailable"); }
   });
 
-  /** Metadata only. Projects are listed; per-project secrets are unavailable because membership needs a value read. */
-  ctx.actions.register("discover-secrets", async (params, actionContext) => {
+  /**
+   * Grouped discovery (ALR-1698). Reads every organisation secret value into worker memory to learn its project,
+   * then returns ids, key names and project ids only. This is the Boss-approved exception to "never read outside
+   * the selected scope"; values are dropped per batch and never returned, stored or logged.
+   */
+  ctx.actions.register("discover-secrets", async (_params, actionContext) => {
     const companyId = userCompany(actionContext);
     if (!companyId) return { ok: false, errorCode: "user_context_required", error: describeCode("user_context_required") };
     const fail = (code: string) => ({ ok: false, errorCode: code, error: describeCode(code) });
-    const projectId = params.projectId;
-    if (projectId !== undefined && (typeof projectId !== "string" || !UUID.test(projectId))) return fail("invalid_input");
     try {
       const config = await ctx.config.get(companyId) as BsmConfig;
+      // Reading every value is a privileged operation: same authority as changing settings.
+      try { await authorizedSetup(ctx, companyId, actionContext.actor.userId!, config); } catch (error) { return fail(setupErrorCode(error)); }
       if (!isSecretRef(config.bsmAccessToken)) return fail("bsm_credential_required");
       const organizationId = typeof config.bsmOrganizationId === "string" && UUID.test(config.bsmOrganizationId) ? config.bsmOrganizationId : "";
       if (!organizationId) return fail("organization_invalid");
       const token = await ctx.secrets.resolve(config.bsmAccessToken, { companyId, configPath: "bsmAccessToken" });
       const sdk = await (dependencies.createSdk ?? createAuthenticatedBitwardenSdk)(token, config.bitwardenRegion === "EU" ? "EU" : "US");
-      const projects = sdk.listProjects ? (await sdk.listProjects(organizationId)).filter((p) => p.organizationId === organizationId)
-        .map((p) => ({ id: p.id, name: p.name ?? null })) : [];
-      if (projectId === undefined) return { ok: true, projects, secrets: null };
-      if (!projects.some((p) => p.id.toLowerCase() === projectId.toLowerCase())) return fail("project_selection_invalid");
-      // Listing a project's secrets needs project membership, which the SDK only returns with the value.
-      // Reading values is not approved for discovery, so fail closed.
-      return fail("project_membership_unavailable");
+      const catalogue = await discoverCatalogue(sdk, organizationId);
+      return { ok: true, ...catalogue };
     } catch (error) { return fail((error as { name?: string; code?: unknown })?.name === "AdapterError" && typeof (error as { code?: unknown }).code === "string" ? (error as { code: string }).code : "remote_unavailable"); }
   });
 }

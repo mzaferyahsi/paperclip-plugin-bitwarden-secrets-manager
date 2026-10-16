@@ -1,6 +1,6 @@
 import { AdapterError } from "./types.js";
-import type { BsmSdk, BsmSecret, BsmSnapshot, SelectedBsmSecret } from "./types.js";
-import { selectionAdmits, type ProjectSelection } from "../config.js";
+import type { BsmCatalogue, BsmSdk, BsmSecret, BsmSnapshot, SelectedBsmSecret } from "./types.js";
+import { isRealProject, NO_PROJECT_ID, selectionAdmits, type ProjectSelection } from "../config.js";
 import type { LogLevel } from "@bitwarden/sdk-napi";
 
 /** Small structural boundary around the official SDK; native SDK types stay outside callers. */
@@ -61,10 +61,10 @@ export function bitwardenSdkAdapter(client: BitwardenClientLike): BsmSdk {
     async getSecrets(ids) {
       const rows = await bounded(sdkRows<any>(() => client.secrets().getByIds([...ids])));
       if (!rows) throw new AdapterError("snapshot_incomplete");
-      if (rows.some(row => !row.id || !row.organizationId || row.projectId === undefined || row.key === undefined ||
+      if (rows.some(row => !row.id || !row.organizationId || row.key === undefined ||
         row.value === undefined || !row.revisionDate)) throw new AdapterError("snapshot_incomplete");
       return rows.map(row => ({
-        id: row.id!, organizationId: row.organizationId!, projectId: row.projectId!, key: row.key!,
+        id: row.id!, organizationId: row.organizationId!, ...(row.projectId === undefined ? {} : { projectId: row.projectId }), key: row.key!,
         value: row.value!, revisionDate: row.revisionDate instanceof Date ? row.revisionDate.toISOString() : row.revisionDate!,
         ...(row.archived === undefined ? {} : { archived: row.archived }),
       }));
@@ -90,7 +90,7 @@ export async function createAuthenticatedBitwardenSdk(token: string, region: "US
     apiUrl: `https://api.bitwarden${suffix}`,
     identityUrl: `https://identity.bitwarden${suffix}`,
     deviceType: sdk.DeviceType.SDK,
-    userAgent: "paperclip-plugin-bitwarden-secrets-manager-sync/0.1.1",
+    userAgent: "paperclip-plugin-bitwarden-secrets-manager-sync/0.1.2",
   }, 4 as LogLevel);
   try {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -107,12 +107,66 @@ export async function createAuthenticatedBitwardenSdk(token: string, region: "US
   return bitwardenSdkAdapter(client as unknown as BitwardenClientLike);
 }
 
+const MAX_ORG_SECRETS = 500;
+
 /**
- * Read the in-scope source values before exposing a snapshot to diff/apply code.
- * `selection` is a per-project union; a plain Set means whole-project for each ID (legacy).
- * Values are fetched only for IDs whose project membership is known from list metadata and admitted by
- * the selection. When the list carries no project (SDK 1.0.0), whole, legacy, mixed and selected
- * scopes all fail closed with project_membership_unavailable before any value request.
+ * Discovery (ALR-1698): SDK 1.0.0 `list` carries no project, so project membership is learned from `getByIds`,
+ * which returns it together with the value. Every organisation secret value therefore passes through worker
+ * memory here. That is the Boss-approved exception. The value is dropped as each batch ends and only
+ * {id, key, projectId} survives. Nothing returned from this function can hold a value.
+ */
+export async function discoverCatalogue(sdk: BsmSdk, organizationId: string, batchSize = 100): Promise<BsmCatalogue> {
+  if (!organizationId || !Number.isInteger(batchSize) || batchSize < 1) throw new AdapterError("invalid_input");
+  try {
+    const visible = sdk.listProjects ? (await sdk.listProjects(organizationId)).filter(p => p.organizationId === organizationId) : [];
+    const names = new Map(visible.map(p => [p.id.toLowerCase(), p.name ?? null]));
+    const listed = await sdk.listSecretIds(organizationId);
+    if (listed.length > MAX_ORG_SECRETS) throw new AdapterError("secret_limit_exceeded");
+    const seen = new Set<string>();
+    for (const row of listed) {
+      if (!row.id || seen.has(row.id) || row.organizationId !== organizationId) throw new AdapterError("snapshot_incomplete");
+      seen.add(row.id);
+    }
+    const ids = listed.map(row => row.id);
+    const secrets: BsmCatalogue["secrets"] = [];
+    const unselectable: BsmCatalogue["unselectable"] = [];
+    for (let offset = 0; offset < ids.length; offset += batchSize) {
+      const batchIds = ids.slice(offset, offset + batchSize);
+      const batch = await sdk.getSecrets(batchIds);
+      const byId = new Map(batch.map(secret => [secret.id, secret]));
+      if (byId.size !== batchIds.length || batchIds.some(id => !byId.has(id)) || batch.some(secret => !batchIds.includes(secret.id))) {
+        throw new AdapterError("snapshot_incomplete");
+      }
+      for (const id of batchIds) {
+        const secret = byId.get(id)!;
+        if (secret.organizationId !== organizationId) throw new AdapterError("snapshot_incomplete");
+        if (secret.archived) continue;
+        // Copy only metadata; the row (and its value) goes out of scope with the batch.
+        if (secret.projectId === undefined) unselectable.push({ id: secret.id, key: secret.key });
+        else secrets.push({ id: secret.id, key: secret.key, projectId: secret.projectId ?? NO_PROJECT_ID, selectable: true });
+      }
+    }
+    // A secret in a project the token cannot list still gets a group, named by id only; never guessed.
+    const counts = new Map<string, number>();
+    for (const secret of secrets) counts.set(secret.projectId.toLowerCase(), (counts.get(secret.projectId.toLowerCase()) ?? 0) + 1);
+    const projects: BsmCatalogue["projects"] = [];
+    for (const [id, name] of names) projects.push({ id, name, secretCount: counts.get(id) ?? 0 });
+    for (const [id, secretCount] of counts) if (!names.has(id) && id !== NO_PROJECT_ID) projects.push({ id, name: null, secretCount });
+    if (counts.has(NO_PROJECT_ID)) projects.push({ id: NO_PROJECT_ID, name: null, secretCount: counts.get(NO_PROJECT_ID)! });
+    return { projects, secrets: secrets.map(s => ({ ...s, projectId: s.projectId.toLowerCase() })), unselectable };
+  } catch (error) {
+    if (error instanceof AdapterError) throw error;
+    throw new AdapterError("remote_unavailable", true);
+  }
+}
+
+/**
+ * Read the selected source values before exposing a snapshot to diff/apply code (ALR-1698).
+ * `selection` is a union of per-project entries (a plain Set means whole-project for each ID, legacy).
+ * Membership comes from the list row when present; when the list carries none (SDK 1.0.0) every listed
+ * secret is read in batches and kept only if its own project is admitted. Values of secrets that are not
+ * admitted are dropped with the batch. A secret with no reported project is unselectable: it is skipped and
+ * the snapshot is marked incomplete so it can never authorize a removal.
  */
 export async function readBsmSnapshot(
   sdk: BsmSdk,
@@ -125,15 +179,14 @@ export async function readBsmSnapshot(
   if (!organizationId || entries.length === 0 || !Number.isInteger(batchSize) || batchSize < 1) {
     throw new AdapterError("invalid_input");
   }
-  const projectKeys = new Set(entries.map(entry => entry.projectId.toLowerCase()));
-  const hasWholeProject = entries.some(entry => entry.mode === "all");
-  const selectedIds = new Set(entries.flatMap(entry => entry.mode === "selected" ? entry.secretIds.map(id => id.toLowerCase()) : []));
+  const projectKeys = new Set(entries.map(entry => entry.projectId.toLowerCase()).filter(isRealProject));
 
   try {
-    if (sdk.listProjects) {
+    // Fail closed, typed, when a selected project is gone; never fall back to a wider scope.
+    if (sdk.listProjects && projectKeys.size > 0) {
       const visibleProjects = await sdk.listProjects(organizationId);
       const ids = new Set(visibleProjects.filter(project => project.organizationId === organizationId).map(project => project.id.toLowerCase()));
-      if ([...projectKeys].some(id => !ids.has(id))) throw new AdapterError("snapshot_incomplete");
+      if ([...projectKeys].some(id => !ids.has(id))) throw new AdapterError("selected_project_missing");
     }
     const listed = await sdk.listSecretIds(organizationId);
     const seen = new Set<string>();
@@ -144,17 +197,14 @@ export async function readBsmSnapshot(
       seen.add(row.id);
     }
 
-    if (listed.length > 500) throw new AdapterError("snapshot_incomplete");
-    // Membership must come from list metadata before ANY value request, for selected IDs too. SDK 1.0.0 list
-    // rows carry no project, and a value read to learn it would decrypt out-of-project secrets. Fail closed.
-    // Never infer scope from the token, the organization listing or the operator-entered ID.
-    const needsMembership = (row: { id: string }) => hasWholeProject || selectedIds.has(row.id.toLowerCase());
-    if (listed.some(row => row.projectId === undefined && needsMembership(row))) throw new AdapterError("project_membership_unavailable");
-    // Rows with known membership are admitted or rejected here, so out-of-project IDs are never fetched.
-    const candidates = listed.filter(row => row.projectId !== undefined && selectionAdmits(entries, row.projectId, row.id));
+    if (listed.length > MAX_ORG_SECRETS) throw new AdapterError("snapshot_incomplete");
+    // Rows whose project the list already reports are admitted or rejected before any value read.
+    const candidates = listed.filter(row => row.projectId === undefined ||
+      selectionAdmits(entries, row.projectId || NO_PROJECT_ID, row.id));
     const ids = candidates.map(row => row.id);
     const records: SelectedBsmSecret[] = [];
     let complete = true;
+    let skipped = 0;
     for (let offset = 0; offset < ids.length; offset += batchSize) {
       const batchIds = ids.slice(offset, offset + batchSize);
       const batch = await sdk.getSecrets(batchIds);
@@ -168,21 +218,27 @@ export async function readBsmSnapshot(
         if (secret.organizationId !== organizationId || secret.organizationId !== summary.organizationId) {
           throw new AdapterError("snapshot_incomplete");
         }
-        if (secret.archived) continue;
-        if (secret.projectId === null) continue;
-        if (!secret.projectId) throw new AdapterError("snapshot_incomplete");
-        // The secret's actual project decides; a selected ID that moved elsewhere is out of scope.
-        if (!selectionAdmits(entries, secret.projectId, secret.id)) continue;
+        if (secret.projectId === undefined) {
+          // Unreadable project: not selectable, never guessed. It also blocks removals for this run.
+          complete = false;
+          skipped++;
+          continue;
+        }
+        const projectId = secret.projectId || NO_PROJECT_ID;
+        // The secret's own project decides; a value outside the selection is dropped here.
+        if (!selectionAdmits(entries, projectId, secret.id)) continue;
+        if (secret.archived) { skipped++; continue; }
         // A listed but unusable value is not evidence of absence. Mark the
         // snapshot partial so callers cannot use it to authorize removals.
         if (!secret.value.trim()) {
           complete = false;
+          skipped++;
           continue;
         }
-        records.push({ ...secret, projectId: secret.projectId });
+        records.push({ ...secret, projectId });
       }
     }
-    return { complete, secrets: records, skippedCount: ids.length - records.length };
+    return { complete, secrets: records, skippedCount: skipped };
   } catch (error) {
     if (error instanceof AdapterError) throw error;
     // The native SDK exposes plain Error strings. Never return/log those messages.

@@ -36,15 +36,14 @@ test("BWSM snapshot fetches complete selected values and rejects partial batches
     list: async () => ({ success: true, data: { data: [{ id: source.id, organizationId: source.organizationId }] } }),
     getByIds: async () => ({ success: true, data: { data: [source] } }),
   }) });
-  // The real SDK list carries no project, so whole-project scope fails closed before any value read.
-  await assert.rejects(() => readBsmSnapshot(wrapped, "org-1", new Set(["project-1"])),
-    (error: unknown) => error instanceof AdapterError && error.code === "project_membership_unavailable");
-  // Selected mode needs membership before any value request too: no project in the list means fail closed, zero reads.
+  // The real SDK list carries no project, so the value read supplies it and the project then decides.
+  assert.deepEqual((await readBsmSnapshot(wrapped, "org-1", new Set(["project-1"]))).secrets, [source]);
+  assert.deepEqual((await readBsmSnapshot(wrapped, "org-1", new Set(["project-2"]))).secrets, [], "out-of-selection value is dropped");
   let reads = 0;
   const noMembership = { listSecretIds: async () => [{ id: source.id, organizationId: "org-1" }], getSecrets: async () => { reads++; return [source]; } };
-  await assert.rejects(() => readBsmSnapshot(noMembership, "org-1", [{ projectId: "project-1", mode: "selected", secretIds: [source.id] }]),
-    (error: unknown) => error instanceof AdapterError && error.code === "project_membership_unavailable");
-  assert.equal(reads, 0);
+  assert.deepEqual((await readBsmSnapshot(noMembership, "org-1", [{ projectId: "project-1", mode: "selected", secretIds: [source.id] }])).secrets, [source]);
+  assert.equal(reads, 1);
+  reads = 0;
   // A membership-bearing list admits only IDs in the chosen project; a wrong-project ID is never fetched.
   const withMembership = { listSecretIds: async () => [
     { id: source.id, organizationId: "org-1", projectId: "project-1" },

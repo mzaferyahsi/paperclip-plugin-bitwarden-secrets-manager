@@ -1,7 +1,7 @@
 {
   "id": "mzaferyahsi.bitwarden-secrets-manager-sync",
   "apiVersion": 1,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "displayName": "Bitwarden Secrets Manager Sync",
   "description": "Sync selected Bitwarden Secrets Manager items into native company secrets.",
   "author": "mzaferyahsi",

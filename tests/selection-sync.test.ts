@@ -4,7 +4,7 @@ import { PaperclipSecretsAdapter } from "../src/adapters/paperclip.js";
 import type { BsmSecret, HttpRequest, HttpResponse, NativeSecret } from "../src/adapters/types.js";
 import { AdapterError } from "../src/adapters/types.js";
 import { syncCompany, type SyncState } from "../src/sync.js";
-import type { ProjectSelection } from "../src/config.js";
+import { ALL_SECRETS_ID, NO_PROJECT_ID, type ProjectSelection } from "../src/config.js";
 
 const org = "550e8400-e29b-41d4-a716-446655440001";
 const P1 = "550e8400-e29b-41d4-a716-446655440021", P2 = "550e8400-e29b-41d4-a716-446655440022";
@@ -46,8 +46,23 @@ function harness() {
       save: async (next) => { state = structuredClone(next); },
     });
   };
+  // SDK 1.0.0 shape: the list carries no project; membership arrives only with the value read.
+  const runNoHints = (source: BsmSecret[], selection: Record<string, unknown>, extra: Record<string, unknown> = {}) => {
+    const cfg = { bsmOrganizationId: org, targetSecretKeyPrefix: "bitwarden.", archiveOnRemoval: true, ...selection, ...extra };
+    return syncCompany(cfg, {
+      sdk: {
+        listProjects: async () => [{ id: P1, organizationId: org, name: "One" }, { id: P2, organizationId: org, name: "Two" }],
+        listSecretIds: async () => source.map((s) => ({ id: s.id, organizationId: org })),
+        getSecrets: async (ids) => { fetched.push([...ids]); return source.filter((s) => ids.includes(s.id)); },
+      },
+      native: new PaperclipSecretsAdapter(transport, "company-1"), previousState: state,
+      stateFingerprint: state?.configFingerprint, generation: state?.generation,
+      destinationVersions: state?.destinationVersions, absenceEvidence: state?.absenceEvidence,
+      save: async (next) => { state = structuredClone(next); },
+    });
+  };
   const bySource = (id: string) => [...secrets.values()].find((s) => (s.providerMetadata as Record<string, unknown>).bsmSecretId === id);
-  return { run, secrets, requests, fetched, bySource, get state() { return state; } };
+  return { run, runNoHints, secrets, requests, fetched, bySource, get state() { return state; } };
 }
 const sel = (...e: ProjectSelection[]) => ({ bsmProjectSelections: e });
 const mutations = (h: ReturnType<typeof harness>) => h.requests.filter((r) => r.method !== "GET");
@@ -138,4 +153,46 @@ test("invalid or conflicting selections stop before any read or write; there is 
     assert.equal(h.requests.length, 0);
     assert.equal(h.fetched.length, 0);
   }
+});
+
+// ---- ALR-1698: read-all discovery model (list has no project) ----
+test("v0.1.2: all, by-project, individual and mixed selections sync exactly the chosen secrets", async () => {
+  const source = [mk(A, P1), mk(B, P1), mk(C, P2), mk("550e8400-e29b-41d4-a716-446655440034", null as unknown as string)];
+  const D = source[3].id;
+  const cases: [string, Record<string, unknown>, string[]][] = [
+    ["all", sel({ projectId: ALL_SECRETS_ID, mode: "all" }), [A, B, C, D]],
+    ["by project", sel({ projectId: P1, mode: "all" }), [A, B]],
+    ["individual", sel({ projectId: P1, mode: "selected", secretIds: [B] }), [B]],
+    ["mixed", sel({ projectId: P2, mode: "all" }, { projectId: P1, mode: "selected", secretIds: [A] }), [A, C]],
+    ["no project", sel({ projectId: NO_PROJECT_ID, mode: "all" }), [D]],
+  ];
+  for (const [name, selection, expected] of cases) {
+    const h = harness();
+    await h.runNoHints(source, selection);
+    for (const id of [A, B, C, D]) assert.equal(Boolean(h.bySource(id)), expected.includes(id), `${name}: ${id}`);
+    const writes = JSON.stringify(h.requests.filter((r) => r.method !== "GET").map((r) => r.body));
+    for (const id of [A, B, C, D].filter((x) => !expected.includes(x))) assert.equal(writes.includes(`val-${id.slice(-2)}`), false, `${name}: unselected value never written`);
+    assert.equal(JSON.stringify(h.state).includes("val-"), false, `${name}: no value in sync state`);
+  }
+});
+
+test("v0.1.2: a vanished project fails closed with a typed code and writes nothing", async () => {
+  const h = harness();
+  const source = [mk(A, P1)];
+  await h.runNoHints(source, sel({ projectId: P1, mode: "all" }));
+  const before = mutations(h).length;
+  const gone = "550e8400-e29b-41d4-a716-4466554400aa";
+  await assert.rejects(() => h.runNoHints(source, sel({ projectId: gone, mode: "all" })), (e) => e instanceof AdapterError && e.code === "selected_project_missing");
+  assert.equal(mutations(h).length, before);
+});
+
+test("v0.1.2: a secret with no readable project never authorizes removal and is not synced", async () => {
+  const h = harness();
+  const unreadable = { ...mk(B, P1), projectId: undefined } as BsmSecret;
+  const source = [mk(A, P1), unreadable];
+  for (let i = 0; i < 4; i++) await h.runNoHints(source, sel({ projectId: ALL_SECRETS_ID, mode: "all" }));
+  assert.ok(h.bySource(A)); assert.equal(h.bySource(B), undefined, "unreadable project is never guessed");
+  // A is absent from the snapshot while the snapshot is incomplete: no archive, however many runs.
+  for (let i = 0; i < 4; i++) await h.runNoHints([unreadable], sel({ projectId: ALL_SECRETS_ID, mode: "all" }));
+  assert.equal(h.bySource(A)?.status, "active");
 });

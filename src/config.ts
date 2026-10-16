@@ -22,6 +22,11 @@ export type ProjectSelection =
   | { projectId: string; mode: "all" }
   | { projectId: string; mode: "selected"; secretIds: string[] };
 export const MAX_SELECTED_SECRETS = 500;
+/** Internal stand-ins that keep the persisted shape unchanged. Real Bitwarden project IDs are random v4 UUIDs. */
+export const ALL_SECRETS_ID = "ffffffff-ffff-4fff-bfff-ffffffffffff";
+export const NO_PROJECT_ID = "00000000-0000-4000-8000-000000000000";
+export const isAllSecrets = (entries: readonly ProjectSelection[]) => entries.some((e) => e.projectId.toLowerCase() === ALL_SECRETS_ID);
+export const isRealProject = (projectId: string) => ![ALL_SECRETS_ID, NO_PROJECT_ID].includes(projectId.toLowerCase());
 export type SelectionResult =
   | { ok: true; entries: ProjectSelection[]; legacy: boolean }
   | { ok: false; code: "project_allowlist_invalid" | "project_selection_invalid" | "project_selection_conflict" };
@@ -71,12 +76,15 @@ export function normalizeSelection(config: Record<string, unknown>): SelectionRe
       entries.push({ projectId: row.projectId, mode: "selected", secretIds: [...ids as string[]] });
     } else return { ok: false, code: "project_selection_invalid" };
   }
+  // "All secrets" stands alone: mixing it with other entries is ambiguous, so it fails closed.
+  if (projects.has(ALL_SECRETS_ID) && (entries.length !== 1 || entries[0].mode !== "all")) return { ok: false, code: "project_selection_invalid" };
   return { ok: true, legacy: false, entries };
 }
 
 /** Does the selection admit this secret, judged by the project it actually belongs to? */
 export function selectionAdmits(entries: readonly ProjectSelection[], projectId: string | null | undefined, secretId: string): boolean {
   if (!projectId) return false;
+  if (isAllSecrets(entries)) return true;
   const entry = entries.find((e) => e.projectId.toLowerCase() === projectId.toLowerCase());
   if (!entry) return false;
   return entry.mode === "all" || entry.secretIds.some((id) => id.toLowerCase() === secretId.toLowerCase());
