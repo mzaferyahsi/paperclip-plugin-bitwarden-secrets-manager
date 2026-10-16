@@ -118,8 +118,8 @@ const BATCH_ATTEMPTS = 3;
 async function readBatch(sdk: BsmSdk, ids: readonly string[]): Promise<readonly BsmSecret[] | null> {
   for (let attempt = 1; attempt <= BATCH_ATTEMPTS; attempt++) {
     try { return await sdk.getSecrets(ids); } catch (error) {
-      const retryable = error instanceof AdapterError ? error.retryable : true;
-      if (!retryable) throw error;
+      const failure = error instanceof AdapterError ? error : normalizeSdkFailure(error instanceof Error ? error.message : "");
+      if (!failure.retryable) throw failure;
       if (attempt === BATCH_ATTEMPTS) return null;
     }
   }

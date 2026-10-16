@@ -215,7 +215,7 @@ export function SecretTree({ catalogue, entries, onChange }: { catalogue: Catalo
     <label className="org-field">Search by key name or project<input type="search" value={query} onChange={(e) => { setQuery(e.target.value); setGroupPage(0); setPages({}); }} aria-describedby="search-count" /></label>
     <p id="search-count" role="status" aria-live="polite">{filtering ? `${plural(matches.length, "secret")} from ${plural(matchProjects, "project")} match, including those on other pages. ${matchChosen} already selected.` : `Showing all ${plural(catalogue.secrets.length, "secret")}.`}</p>
     <div className="group-head">
-      <button type="button" disabled={matches.length === 0 || matchChosen === matches.length} onClick={() => onChange(setMatching(entries, matches, true))}>{filtering ? `Select all ${matches.length} matching` : `Select all ${matches.length} secrets`}<span className="sr-only">, including those on other pages</span></button>
+      <button type="button" disabled={matches.length === 0 || matchChosen === matches.length} onClick={() => onChange(setMatching(entries, matches, true))}>{filtering ? `Select all ${matches.length} matching` : `Select all ${matches.length} current secrets`}<span className="sr-only">, including those on other pages</span></button>
       <button type="button" disabled={matchChosen === 0 || allSecretsSelected(entries)} onClick={() => onChange(setMatching(entries, matches, false))}>{filtering ? "Clear matching" : "Clear individual choices"}</button>
     </div>
     {groups.length === 0 && <p role="note">{filtering ? "No secrets match this search." : "This organization has no secrets visible to this token."}</p>}
