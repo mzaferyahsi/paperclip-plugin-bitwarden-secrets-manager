@@ -8,7 +8,6 @@ const MESSAGES: Record<string, { message: string; action: string }> = {
   project_selection_conflict: { message: "Both the old project list and the new project selection are set.", action: "Save the selection again from this page. It replaces the old project list." },
   secret_selection_invalid: { message: "A selected secret ID was not found in this Bitwarden organization.", action: "Check each secret UUID you entered, remove or correct the wrong ones and save." },
   selected_project_missing: { message: "A selected project no longer exists or is not visible to the Bitwarden token. Nothing was synced or removed.", action: "Open Scope, load secrets again, and choose projects that still exist." },
-  secret_limit_exceeded: { message: "The organization has more than 500 secrets, which is above the supported limit.", action: "Reduce the secrets visible to the machine account, then load secrets again." },
   selection_unverified: { message: "The selected secrets could not be checked against Bitwarden, so nothing was saved.", action: "Press Test connection, then save again." },
   paperclip_origin_invalid: { message: "The Paperclip origin must be an https:// address with no path.", action: "Enter an origin such as https://paperclip.example and save." },
   unsupported_destination_scope: { message: "Only company destinations are supported in this version.", action: "Remove the destination scope setting or set it to company." },

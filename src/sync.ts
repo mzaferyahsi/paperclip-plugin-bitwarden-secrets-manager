@@ -4,7 +4,6 @@ import { ownershipMatches, PaperclipSecretsAdapter, sourceIdentityKey } from "./
 import { canonicalSelection, normalizeSelection, selectionAdmits, type BsmConfig, type ProjectSelection } from "./config.js";
 
 const OWNER = "mzaferyahsi.bitwarden-secrets-manager-sync" as const;
-const MAX_SECRETS = 500;
 export type JournalItem = {
   sourceId: string; action: "create" | "rotate" | "metadata" | "archive";
   sourceRevision: string; destinationId?: string; priorVersion?: number;
@@ -104,7 +103,6 @@ export async function syncCompany(config: BsmConfig, ports: SyncPorts): Promise<
   const removalFingerprint = ports.previousState?.removalFingerprint ?? ports.stateFingerprint ?? fingerprint;
   const fingerprintUnchanged = ports.stateFingerprint === fingerprint && removalFingerprint === fingerprint;
   const snapshot = await readBsmSnapshot(ports.sdk, String(config.bsmOrganizationId), selection, 100);
-  if (snapshot.secrets.length > MAX_SECRETS) throw new AdapterError("snapshot_incomplete");
 
   const orgId = String(config.bsmOrganizationId);
   const owned = previous.filter(secret => {

@@ -107,7 +107,24 @@ export async function createAuthenticatedBitwardenSdk(token: string, region: "US
   return bitwardenSdkAdapter(client as unknown as BitwardenClientLike);
 }
 
-const MAX_ORG_SECRETS = 500;
+/** Overall wall-clock budget for one discovery / snapshot pass. Running out reports "incomplete"; it never drops secrets silently. */
+export const DISCOVERY_BUDGET_MS = 10 * 60_000;
+const BATCH_ATTEMPTS = 3;
+
+/**
+ * Read one batch with a bounded retry. Credential/permission failures propagate at once. A batch that keeps
+ * failing with a retryable error returns null so the caller can mark the pass incomplete (never truncate silently).
+ */
+async function readBatch(sdk: BsmSdk, ids: readonly string[]): Promise<readonly BsmSecret[] | null> {
+  for (let attempt = 1; attempt <= BATCH_ATTEMPTS; attempt++) {
+    try { return await sdk.getSecrets(ids); } catch (error) {
+      const retryable = error instanceof AdapterError ? error.retryable : true;
+      if (!retryable) throw error;
+      if (attempt === BATCH_ATTEMPTS) return null;
+    }
+  }
+  return null;
+}
 
 /**
  * Discovery (ALR-1698): SDK 1.0.0 `list` carries no project, so project membership is learned from `getByIds`,
@@ -115,13 +132,12 @@ const MAX_ORG_SECRETS = 500;
  * memory here. That is the Boss-approved exception. The value is dropped as each batch ends and only
  * {id, key, projectId} survives. Nothing returned from this function can hold a value.
  */
-export async function discoverCatalogue(sdk: BsmSdk, organizationId: string, batchSize = 100): Promise<BsmCatalogue> {
+export async function discoverCatalogue(sdk: BsmSdk, organizationId: string, batchSize = 100, budgetMs = DISCOVERY_BUDGET_MS, clock: () => number = Date.now): Promise<BsmCatalogue> {
   if (!organizationId || !Number.isInteger(batchSize) || batchSize < 1) throw new AdapterError("invalid_input");
   try {
     const visible = sdk.listProjects ? (await sdk.listProjects(organizationId)).filter(p => p.organizationId === organizationId) : [];
     const names = new Map(visible.map(p => [p.id.toLowerCase(), p.name ?? null]));
     const listed = await sdk.listSecretIds(organizationId);
-    if (listed.length > MAX_ORG_SECRETS) throw new AdapterError("secret_limit_exceeded");
     const seen = new Set<string>();
     for (const row of listed) {
       if (!row.id || seen.has(row.id) || row.organizationId !== organizationId) throw new AdapterError("snapshot_incomplete");
@@ -130,9 +146,14 @@ export async function discoverCatalogue(sdk: BsmSdk, organizationId: string, bat
     const ids = listed.map(row => row.id);
     const secrets: BsmCatalogue["secrets"] = [];
     const unselectable: BsmCatalogue["unselectable"] = [];
+    const started = clock();
+    let complete = true;
+    let readCount = 0;
     for (let offset = 0; offset < ids.length; offset += batchSize) {
+      if (clock() - started > budgetMs) { complete = false; break; }
       const batchIds = ids.slice(offset, offset + batchSize);
-      const batch = await sdk.getSecrets(batchIds);
+      const batch = await readBatch(sdk, batchIds);
+      if (!batch) { complete = false; break; }
       const byId = new Map(batch.map(secret => [secret.id, secret]));
       if (byId.size !== batchIds.length || batchIds.some(id => !byId.has(id)) || batch.some(secret => !batchIds.includes(secret.id))) {
         throw new AdapterError("snapshot_incomplete");
@@ -140,12 +161,14 @@ export async function discoverCatalogue(sdk: BsmSdk, organizationId: string, bat
       for (const id of batchIds) {
         const secret = byId.get(id)!;
         if (secret.organizationId !== organizationId) throw new AdapterError("snapshot_incomplete");
+        readCount++;
         if (secret.archived) continue;
         // Copy only metadata; the row (and its value) goes out of scope with the batch.
         if (secret.projectId === undefined) unselectable.push({ id: secret.id, key: secret.key });
         else secrets.push({ id: secret.id, key: secret.key, projectId: secret.projectId ?? NO_PROJECT_ID, selectable: true });
       }
     }
+    if (readCount < ids.length) complete = false;
     // A secret in a project the token cannot list still gets a group, named by id only; never guessed.
     const counts = new Map<string, number>();
     for (const secret of secrets) counts.set(secret.projectId.toLowerCase(), (counts.get(secret.projectId.toLowerCase()) ?? 0) + 1);
@@ -153,7 +176,7 @@ export async function discoverCatalogue(sdk: BsmSdk, organizationId: string, bat
     for (const [id, name] of names) projects.push({ id, name, secretCount: counts.get(id) ?? 0 });
     for (const [id, secretCount] of counts) if (!names.has(id) && id !== NO_PROJECT_ID) projects.push({ id, name: null, secretCount });
     if (counts.has(NO_PROJECT_ID)) projects.push({ id: NO_PROJECT_ID, name: null, secretCount: counts.get(NO_PROJECT_ID)! });
-    return { projects, secrets: secrets.map(s => ({ ...s, projectId: s.projectId.toLowerCase() })), unselectable };
+    return { projects, secrets: secrets.map(s => ({ ...s, projectId: s.projectId.toLowerCase() })), unselectable, complete, listedCount: ids.length, readCount };
   } catch (error) {
     if (error instanceof AdapterError) throw error;
     throw new AdapterError("remote_unavailable", true);
@@ -173,6 +196,8 @@ export async function readBsmSnapshot(
   organizationId: string,
   selection: ReadonlySet<string> | readonly ProjectSelection[],
   batchSize = 100,
+  budgetMs = DISCOVERY_BUDGET_MS,
+  clock: () => number = Date.now,
 ): Promise<BsmSnapshot> {
   const entries: readonly ProjectSelection[] = selection instanceof Set
     ? [...selection].map(projectId => ({ projectId, mode: "all" as const })) : selection as readonly ProjectSelection[];
@@ -197,7 +222,7 @@ export async function readBsmSnapshot(
       seen.add(row.id);
     }
 
-    if (listed.length > MAX_ORG_SECRETS) throw new AdapterError("snapshot_incomplete");
+    const summaries = new Map(listed.map(row => [row.id, row]));
     // Rows whose project the list already reports are admitted or rejected before any value read.
     const candidates = listed.filter(row => row.projectId === undefined ||
       selectionAdmits(entries, row.projectId || NO_PROJECT_ID, row.id));
@@ -205,16 +230,21 @@ export async function readBsmSnapshot(
     const records: SelectedBsmSecret[] = [];
     let complete = true;
     let skipped = 0;
+    const started = clock();
     for (let offset = 0; offset < ids.length; offset += batchSize) {
+      // Out of time, or a batch kept failing: what was read is still valid to write, but the snapshot is
+      // partial so it can never authorize a removal. The next run retries.
+      if (clock() - started > budgetMs) { complete = false; break; }
       const batchIds = ids.slice(offset, offset + batchSize);
-      const batch = await sdk.getSecrets(batchIds);
+      const batch = await readBatch(sdk, batchIds);
+      if (!batch) { complete = false; break; }
       const byId = new Map(batch.map(secret => [secret.id, secret]));
       if (byId.size !== batchIds.length || batchIds.some(id => !byId.has(id)) || batch.some(secret => !batchIds.includes(secret.id))) {
         throw new AdapterError("snapshot_incomplete");
       }
       for (const id of batchIds) {
         const secret = byId.get(id)!;
-        const summary = listed.find(row => row.id === id)!;
+        const summary = summaries.get(id)!;
         if (secret.organizationId !== organizationId || secret.organizationId !== summary.organizationId) {
           throw new AdapterError("snapshot_incomplete");
         }

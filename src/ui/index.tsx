@@ -41,7 +41,6 @@ export const ERROR_COPY: Record<string, Copy> = {
   project_selection_conflict: { title: "Two project lists are set", action: "Save the selection again from this page. It replaces the old list." },
   secret_selection_invalid: { title: "A selected secret was not found", action: "Load secrets again, uncheck the missing ones and save." },
   selected_project_missing: { title: "A selected project no longer exists", action: "Nothing was synced or removed. Open Scope, load secrets again and choose projects that still exist." },
-  secret_limit_exceeded: { title: "The organization has more than 500 secrets", action: "The plugin supports up to 500. Reduce what the machine account can see, then load secrets again." },
   selection_unverified: { title: "The selection could not be checked", action: "Nothing was saved. Press Test connection, then save again." },
   sync_interval_invalid: { title: "The interval is not allowed", action: "Choose a value of at least 5 minutes." },
   target_key_prefix_invalid: { title: "The key prefix is not valid", action: "Use letters, digits, dots, dashes or underscores." },
@@ -87,6 +86,8 @@ export type Catalogue = {
   projects: { id: string; name: string | null; secretCount: number }[];
   secrets: { id: string; key: string; projectId: string }[];
   unselectable: { id: string; key: string }[];
+  /** false = discovery stopped early (time budget or a failing batch). Counts below are then a subset. */
+  complete?: boolean; listedCount?: number; readCount?: number;
 };
 /** Legacy `bsmProjectIds` is shown as whole-project entries; saving sends only the new form (explicit migration). */
 export function selectionsFromConfig(config: Record<string, unknown>): { entries: SelectionEntry[]; legacy: boolean } {
@@ -140,36 +141,109 @@ export function selectionSummary(entries: readonly SelectionEntry[], catalogue: 
   for (const e of entries) {
     const inProject = catalogue.secrets.filter((s) => same(s.projectId, e.projectId));
     if (e.mode === "all") { secrets += inProject.length; projects++; continue; }
-    const hit = e.secretIds.filter((id) => inProject.some((s) => same(s.id, id))).length;
+    const known = new Set(inProject.map((s) => s.id.toLowerCase()));
+    const hit = e.secretIds.filter((id) => known.has(id.toLowerCase())).length;
     secrets += hit; unknown += e.secretIds.length - hit; if (hit > 0) projects++;
   }
   return { secrets, projects, unknown };
 }
 export const projectLabel = (p: { id: string; name: string | null }) => same(p.id, NO_PROJECT_ID) ? "No project" : p.name ?? `Project ${p.id.slice(0, 8)}`;
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+/** Case-insensitive match on key name or project label. An empty query matches everything. */
+export function matchesQuery(secret: { key: string }, projectName: string, query: string): boolean {
+  const q = query.trim().toLowerCase();
+  return q === "" || secret.key.toLowerCase().includes(q) || projectName.toLowerCase().includes(q);
+}
+/** Every catalogue secret that matches, across ALL pages (never just the visible page). */
+export function matchingSecrets(catalogue: Catalogue, query: string): Catalogue["secrets"] {
+  const names = new Map(catalogue.projects.map((p) => [p.id.toLowerCase(), projectLabel(p)]));
+  return catalogue.secrets.filter((s) => matchesQuery(s, names.get(s.projectId.toLowerCase()) ?? "", query));
+}
+/** Add (or remove) a set of secrets as individual choices. Whole-project entries already cover their secrets. */
+export function setMatching(entries: readonly SelectionEntry[], matches: Catalogue["secrets"], on: boolean): SelectionEntry[] {
+  if (allSecretsSelected(entries)) return [...entries];
+  const byProject = new Map<string, Set<string>>();
+  for (const m of matches) { const k = m.projectId.toLowerCase(); (byProject.get(k) ?? byProject.set(k, new Set()).get(k)!).add(m.id.toLowerCase()); }
+  const out: SelectionEntry[] = [];
+  for (const e of entries) {
+    const k = e.projectId.toLowerCase(), hit = byProject.get(k);
+    if (!hit || e.mode === "all") { out.push(e); continue; }
+    if (on) { out.push(e); continue; }
+    const rest = e.secretIds.filter((id) => !hit.has(id.toLowerCase()));
+    if (rest.length) out.push({ ...e, secretIds: rest });
+  }
+  if (!on) return out;
+  for (const [k, hit] of byProject) {
+    const current = out.findIndex((e) => e.projectId.toLowerCase() === k);
+    if (current >= 0 && out[current].mode === "all") continue;
+    if (current < 0) { out.push({ projectId: k, mode: "selected", secretIds: [...hit] }); continue; }
+    const e = out[current] as Extract<SelectionEntry, { mode: "selected" }>;
+    const have = new Set(e.secretIds.map((id) => id.toLowerCase()));
+    out[current] = { ...e, secretIds: [...e.secretIds, ...[...hit].filter((id) => !have.has(id))] };
+  }
+  return out;
+}
+export const PAGE_SIZE = 25, GROUPS_PER_PAGE = 20;
+export const pageCount = (total: number, size: number) => Math.max(1, Math.ceil(total / size));
+function Pager({ id, label, page, total, size, onPage }: { id: string; label: string; page: number; total: number; size: number; onPage: (p: number) => void }) {
+  const pages = pageCount(total, size);
+  if (total <= size) return null;
+  const from = page * size + 1, to = Math.min(total, (page + 1) * size);
+  return <nav aria-label={`${label} pages`} className="pager"><button type="button" disabled={page === 0} onClick={() => onPage(page - 1)}>Previous<span className="sr-only"> page of {label}</span></button>
+    <span id={id} role="status" aria-live="polite">Showing {from}–{to} of {total} · page {page + 1} of {pages}</span>
+    <button type="button" disabled={page >= pages - 1} onClick={() => onPage(page + 1)}>Next<span className="sr-only"> page of {label}</span></button></nav>;
+}
 export function SecretTree({ catalogue, entries, onChange }: { catalogue: Catalogue; entries: readonly SelectionEntry[]; onChange: (next: SelectionEntry[]) => void }) {
   const [open, setOpen] = useState<Record<string, boolean>>({});
-  const groups = catalogue.projects.filter((p) => p.secretCount > 0 || projectChecked(entries, p.id));
+  const [pages, setPages] = useState<Record<string, number>>({});
+  const [groupPage, setGroupPage] = useState(0);
+  const [query, setQuery] = useState("");
+  const filtering = query.trim() !== "";
+  const matches = matchingSecrets(catalogue, query);
+  const matchesByProject = new Map<string, Catalogue["secrets"]>();
+  for (const m of matches) { const k = m.projectId.toLowerCase(); (matchesByProject.get(k) ?? matchesByProject.set(k, []).get(k)!).push(m); }
+  const allGroups = catalogue.projects.filter((p) => p.secretCount > 0 || projectChecked(entries, p.id));
+  const groups = allGroups.filter((p) => !filtering || (matchesByProject.get(p.id.toLowerCase())?.length ?? 0) > 0);
+  const gPage = Math.min(groupPage, pageCount(groups.length, GROUPS_PER_PAGE) - 1);
+  const shown = groups.slice(gPage * GROUPS_PER_PAGE, (gPage + 1) * GROUPS_PER_PAGE);
+  const matchProjects = new Set(matches.map((m) => m.projectId.toLowerCase())).size;
+  const matchChosen = matches.filter((m) => secretChecked(entries, m.projectId, m.id)).length;
   return <div>
-    {groups.length === 0 && <p role="note">This organization has no secrets visible to this token.</p>}
-    {groups.map((p) => {
-      const key = p.id.toLowerCase(), label = projectLabel(p), secrets = catalogue.secrets.filter((s) => same(s.projectId, p.id));
-      const chosen = secrets.filter((s) => secretChecked(entries, p.id, s.id)).length, expanded = open[key] === true;
+    {catalogue.complete === false && <div className="card" role="alert"><strong>Discovery incomplete</strong>
+      <p>Only {catalogue.readCount ?? 0} of {catalogue.listedCount ?? 0} listed secrets could be read before loading stopped. Nothing was dropped silently, and sync will not remove anything based on this list. Press Reload secrets to continue.</p></div>}
+    <p role="note">{plural(catalogue.secrets.length, "secret")} in {plural(allGroups.filter((p) => p.secretCount > 0).length, "group")}. Lists are paged; selecting applies to every match, not only the visible page.</p>
+    <label className="org-field">Search by key name or project<input type="search" value={query} onChange={(e) => { setQuery(e.target.value); setGroupPage(0); setPages({}); }} aria-describedby="search-count" /></label>
+    <p id="search-count" role="status" aria-live="polite">{filtering ? `${plural(matches.length, "secret")} from ${plural(matchProjects, "project")} match, including those on other pages. ${matchChosen} already selected.` : `Showing all ${plural(catalogue.secrets.length, "secret")}.`}</p>
+    <div className="group-head">
+      <button type="button" disabled={matches.length === 0 || matchChosen === matches.length} onClick={() => onChange(setMatching(entries, matches, true))}>{filtering ? `Select all ${matches.length} matching` : `Select all ${matches.length} secrets`}<span className="sr-only">, including those on other pages</span></button>
+      <button type="button" disabled={matchChosen === 0 || allSecretsSelected(entries)} onClick={() => onChange(setMatching(entries, matches, false))}>{filtering ? "Clear matching" : "Clear individual choices"}</button>
+    </div>
+    {groups.length === 0 && <p role="note">{filtering ? "No secrets match this search." : "This organization has no secrets visible to this token."}</p>}
+    {shown.map((p) => {
+      const key = p.id.toLowerCase(), label = projectLabel(p), all = catalogue.secrets.filter((s) => same(s.projectId, p.id));
+      const rows = filtering ? matchesByProject.get(key) ?? [] : all;
+      const chosen = all.filter((s) => secretChecked(entries, p.id, s.id)).length, expanded = open[key] === true;
+      const page = Math.min(pages[key] ?? 0, pageCount(rows.length, PAGE_SIZE) - 1);
       return <div className="card" key={key}>
         <div className="group-head">
           <label className="inline-control"><input type="checkbox" checked={projectChecked(entries, p.id)} onChange={() => onChange(toggleProject(entries, p.id))} aria-describedby={`count-${key}`} /> <strong>{label}</strong></label>
-          <span id={`count-${key}`}>{plural(secrets.length, "secret")} · {chosen} selected</span>
+          <span id={`count-${key}`}>{plural(all.length, "secret")} · {chosen} selected{filtering ? ` · ${rows.length} match` : ""}</span>
           <button type="button" aria-expanded={expanded} aria-controls={`secrets-${key}`} onClick={() => setOpen((o) => ({ ...o, [key]: !expanded }))}>{expanded ? "Hide" : "Show"} secrets<span className="sr-only"> in {label}</span></button>
         </div>
         {projectChecked(entries, p.id) && <small>Whole project selected, including secrets added to it later.</small>}
-        <ul id={`secrets-${key}`} hidden={!expanded} aria-label={`Secrets in ${label}`}>
-          {secrets.map((s) => <li key={s.id}><label className="inline-control"><input type="checkbox" checked={secretChecked(entries, p.id, s.id)} disabled={projectChecked(entries, p.id)} onChange={() => onChange(toggleSecret(entries, p.id, s.id))} /> <span className="uuid">{s.key}</span></label></li>)}
-        </ul>
+        <div id={`secrets-${key}`} hidden={!expanded}>
+          <ul aria-label={`Secrets in ${label}`}>
+            {rows.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE).map((s) => <li key={s.id}><label className="inline-control"><input type="checkbox" checked={secretChecked(entries, p.id, s.id)} disabled={projectChecked(entries, p.id)} onChange={() => onChange(toggleSecret(entries, p.id, s.id))} /> <span className="uuid">{s.key}</span></label></li>)}
+          </ul>
+          <Pager id={`pager-${key}`} label={`secrets in ${label}`} page={page} total={rows.length} size={PAGE_SIZE} onPage={(n) => setPages((m) => ({ ...m, [key]: n }))} />
+        </div>
       </div>;
     })}
+    <Pager id="group-pager" label="projects" page={gPage} total={groups.length} size={GROUPS_PER_PAGE} onPage={setGroupPage} />
     {catalogue.unselectable.length > 0 && <div className="card" role="note"><strong>{plural(catalogue.unselectable.length, "secret")} cannot be selected</strong>
       <p>Bitwarden did not report a project for these, so the plugin does not guess. They are not synced.</p>
-      <ul aria-label="Secrets that cannot be selected">{catalogue.unselectable.map((s) => <li key={s.id} className="uuid">{s.key}</li>)}</ul></div>}
+      <ul aria-label="Secrets that cannot be selected">{catalogue.unselectable.slice(0, PAGE_SIZE).map((s) => <li key={s.id} className="uuid">{s.key}</li>)}</ul>
+      {catalogue.unselectable.length > PAGE_SIZE && <small>Showing the first {PAGE_SIZE} of {catalogue.unselectable.length}.</small>}</div>}
   </div>;
 }
 const vars: React.CSSProperties = { color: "var(--foreground, #17202a)", background: "var(--background, #fff)", fontFamily: "inherit" };
@@ -187,7 +261,7 @@ const css = `
 @keyframes bsm-pulse{50%{opacity:.45}}.bsm .steps{display:flex;gap:8px;flex-wrap:wrap}.bsm .steps a{border:1px solid var(--border,#596579);text-decoration:none;color:inherit}
 .bsm .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.bsm .option[aria-checked=true]{background:var(--accent-subtle,#e9eef9);border-color:var(--focus,#245bcc)}
 .bsm .group-head{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center}.bsm .group-head .inline-control{flex:1 1 200px;min-width:0}.bsm ul{padding-left:20px;margin:8px 0}.bsm li{min-width:0;margin:4px 0}.bsm [hidden]{display:none}.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
-@media(max-width:500px){.bsm{padding:12px}.bsm .grid{grid-template-columns:1fr}.bsm .steps{display:grid;grid-template-columns:1fr 1fr}.bsm .steps a{justify-content:center}}
+.bsm .pager{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:8px 0}@media(max-width:500px){.bsm{padding:12px}.bsm .grid{grid-template-columns:1fr}.bsm .steps{display:grid;grid-template-columns:1fr 1fr}.bsm .steps a{justify-content:center}}
 .bsm.widget{padding:0}.bsm.widget section{margin:0}.bsm.widget a{padding:0;text-decoration:underline;color:var(--link,var(--foreground,#17202a))}
 `;
 const stamp = (value?: string | null) => value ? new Date(value).toLocaleString() : "Not yet";
@@ -296,7 +370,7 @@ export function BsmSettingsPage({ context }: { context: { companyId?: string | n
           <label className="radio-option"><input type="radio" name="scope-mode" checked={allSecretsSelected(entries)} onChange={()=>setEntries(setAllSecrets(entries,true))} />All secrets (including future ones)</label>
           <label className="radio-option"><input type="radio" name="scope-mode" checked={!allSecretsSelected(entries)} onChange={()=>setEntries(setAllSecrets(entries,false))} />Choose projects or secrets</label></div>
         {!allSecretsSelected(entries)&&(catalogue?<SecretTree catalogue={catalogue} entries={entries} onChange={setEntries} />:<p role="note">{entries.length===0?"Nothing chosen yet. Load secrets, then tick whole projects or single secrets.":`${plural(entries.filter((e)=>e.mode==="all").length,"whole project")} and ${plural(entries.reduce((n,e)=>n+(e.mode==="selected"?e.secretIds.length:0),0),"individual secret")} saved. Load secrets to review them.`}</p>)}
-        <p role="status" aria-live="polite" id="scope-summary"><strong>{allSecretsSelected(entries)?(sum.secrets===null?"All secrets in the organization will sync.":`${plural(sum.secrets,"secret")} from ${plural(sum.projects ?? 0,"project")} will sync (all secrets, including future ones).`):sum.secrets===null?(entries.length?"Load secrets to see the count.":"No secrets chosen."):`${plural(sum.secrets,"secret")} from ${plural(sum.projects ?? 0,"project")} will sync.${sum.unknown?` ${plural(sum.unknown,"saved secret")} not found in Bitwarden.`:""}`}</strong></p>
+        <p role="status" aria-live="polite" id="scope-summary"><strong>{allSecretsSelected(entries)?(sum.secrets===null?"All secrets in the organization will sync.":`${plural(sum.secrets,"secret")} from ${plural(sum.projects ?? 0,"project")} will sync (all secrets, including future ones and those on other pages).`):sum.secrets===null?(entries.length?"Load secrets to see the count.":"No secrets chosen."):`${plural(sum.secrets,"secret")} from ${plural(sum.projects ?? 0,"project")} will sync, including those on other pages.${sum.unknown?` ${plural(sum.unknown,"saved secret")} not found in Bitwarden.`:""}`}</strong></p>
         {(fieldError==="bsmProjectSelections"||fieldError==="bsmProjectIds")&&<small id="projects-error">Check the selection: choose All secrets, or at least one project or secret.</small>}
       </fieldset>
       <label>Sync interval (minutes)<input type="number" min={5} value={Number(config.syncIntervalMinutes??15)} onChange={(e)=>change("syncIntervalMinutes",Number(e.target.value))} /></label>

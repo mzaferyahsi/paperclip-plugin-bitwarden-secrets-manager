@@ -13,8 +13,7 @@ export type AdapterErrorCode =
   | "ownership_mismatch"
   | "ambiguous_write"
   | "invalid_input"
-  | "selected_project_missing"
-  | "secret_limit_exceeded";
+  | "selected_project_missing";
 
 export class AdapterError extends Error {
   readonly code: AdapterErrorCode;
@@ -61,6 +60,11 @@ export interface BsmCatalogue {
   secrets: { id: string; key: string; projectId: string; selectable: true }[];
   /** Secrets whose project Bitwarden did not report. Listed by key; never selectable. */
   unselectable: { id: string; key: string }[];
+  /** false = the time budget ran out or a batch kept failing: the lists above are a subset, never the whole. */
+  complete: boolean;
+  /** True totals as listed by Bitwarden, and how many were actually read. Equal when complete. */
+  listedCount: number;
+  readCount: number;
 }
 
 export interface BsmSnapshot {

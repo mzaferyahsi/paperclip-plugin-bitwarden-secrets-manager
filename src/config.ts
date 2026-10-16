@@ -21,7 +21,8 @@ export function isSecretRef(value: unknown): value is SecretRef {
 export type ProjectSelection =
   | { projectId: string; mode: "all" }
   | { projectId: string; mode: "selected"; secretIds: string[] };
-export const MAX_SELECTED_SECRETS = 500;
+/** Payload sanity bound for individually listed secret ids in one saved config; not a limit on how many secrets are discovered or synced. */
+export const MAX_SELECTED_SECRETS = 50_000;
 /** Internal stand-ins that keep the persisted shape unchanged. Real Bitwarden project IDs are random v4 UUIDs. */
 export const ALL_SECRETS_ID = "ffffffff-ffff-4fff-bfff-ffffffffffff";
 export const NO_PROJECT_ID = "00000000-0000-4000-8000-000000000000";

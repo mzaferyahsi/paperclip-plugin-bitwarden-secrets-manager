@@ -145,18 +145,6 @@ test("without list metadata every value is read, only admitted ones are kept, an
   assert.deepEqual([ids(everything), everything.complete], [[S1, S3], false], "unreadable project is never guessed or synced");
 });
 
-test("the 500-secret cap fails closed for sync and for discovery", async () => {
-  const many = Array.from({ length: 501 }, (_, n) => ({ id: `s-${n}`, organizationId: org }));
-  let reads = 0;
-  const sdk = { listSecretIds: async () => many, getSecrets: async () => { reads++; return []; } };
-  await assert.rejects(() => readBsmSnapshot(sdk, org, [{ projectId: ALL_SECRETS_ID, mode: "all" }]), (e) => e.code === "snapshot_incomplete");
-  await assert.rejects(() => discoverCatalogue(sdk, org), (e) => e.code === "secret_limit_exceeded");
-  assert.equal(reads, 0);
-  const exactly = Array.from({ length: 500 }, (_, n) => ({ id: `s-${n}`, organizationId: org }));
-  const ok = { listSecretIds: async () => exactly, getSecrets: async (want) => want.map((sid) => ({ id: sid, organizationId: org, projectId: P1, key: sid, value: "v", revisionDate: "r" })) };
-  assert.equal((await discoverCatalogue(ok, org)).secrets.length, 500);
-});
-
 test("discoverCatalogue groups by project, names them, adds a No project group and flags unreadable projects; values never escape", async () => {
   const rows = { [S1]: P1, [S2]: P1, [S3]: null, [S4]: undefined };
   const sdk = { listProjects: async () => [{ id: P1, organizationId: org, name: "Alpha" }, { id: P2, organizationId: org, name: "Empty" }],
@@ -357,7 +345,7 @@ test("QA blocker: a loopback http origin is rejected by shipped origin validatio
 // ---- Manual secret-ID selection (ALR-1545) ----
 test("UI copy: new codes are covered and plain; the old limitation text is gone", () => {
   assert.match(ui.errorCopy("selected_project_missing").action, /Nothing was synced or removed/);
-  assert.match(ui.errorCopy("secret_limit_exceeded").title, /500/);
+  assert.equal(ui.errorCopy("secret_limit_exceeded").title, "Something went wrong", "the 500 cap is retired");
   assert.equal(ui.errorCopy("project_membership_unavailable").title, "Something went wrong", "retired code");
   assert.deepEqual(ui.copyCoverage(), []);
 });
