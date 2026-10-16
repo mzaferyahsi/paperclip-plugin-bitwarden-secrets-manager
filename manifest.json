@@ -11,7 +11,7 @@
     "plugin.state.read", "plugin.state.write", "activity.log.write",
     "ui.dashboardWidget.register", "ui.action.register", "instance.settings.register"
   ],
-  "entrypoints": { "worker": "./dist/worker.js", "ui": "./dist/ui.js" },
+  "entrypoints": { "worker": "./dist/worker.js", "ui": "./dist/ui/" },
   "instanceConfigSchema": {
     "type": "object",
     "properties": {

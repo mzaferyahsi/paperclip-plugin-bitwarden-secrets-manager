@@ -35,7 +35,7 @@ for (const key of ["manifest", "worker", "ui"]) {
   await access(entrypoint);
 }
 const worker = await import(pathToFileURL(path.join(packageRoot, "dist/worker.js")));
-const ui = await import(pathToFileURL(path.join(packageRoot, "dist/ui.js")));
+const ui = await import(pathToFileURL(path.join(packageRoot, "dist/ui/index.js")));
 if (!worker.default || typeof ui.BsmSettingsPage !== "function" || typeof ui.BsmStatusWidget !== "function") {
   throw new Error("Packed worker or settings UI exports did not load");
 }
