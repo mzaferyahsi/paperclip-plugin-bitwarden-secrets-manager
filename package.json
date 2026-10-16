@@ -2,14 +2,23 @@
   "name": "paperclip-plugin-bitwarden-secrets-manager",
   "version": "0.1.1",
   "private": false,
+  "license": "UNLICENSED",
   "type": "module",
   "paperclipPlugin": {
     "manifest": "./dist/manifest.js",
     "worker": "./dist/worker.js",
     "ui": "./dist/ui.js"
   },
-  "engines": { "node": ">=24.11.0" },
-  "files": ["manifest.json", "dist", "LICENSE", "NOTICE.md", "README.md", "RELEASE_NOTES.md"],
+  "engines": {
+    "node": ">=24.11.0"
+  },
+  "files": [
+    "manifest.json",
+    "dist",
+    "NOTICE.md",
+    "README.md",
+    "RELEASE_NOTES.md"
+  ],
   "scripts": {
     "clean": "rm -rf dist",
     "build": "npm run clean && node scripts/build.mjs",
@@ -30,6 +39,7 @@
     "@types/node": "24.10.0",
     "@types/react": "19.2.18",
     "esbuild": "0.25.11",
+    "react-dom": "19.2.0",
     "typescript": "5.9.3"
   }
 }
