@@ -127,8 +127,13 @@ test("whole-project fails closed without reading any value when the list carries
   await assert.rejects(() => readBsmSnapshot(sdk, org, new Set([P1])), (e) => e.code === "project_membership_unavailable");
   await assert.rejects(() => readBsmSnapshot(sdk, org, [{ projectId: P1, mode: "selected", secretIds: [S1] }, { projectId: P2, mode: "all" }]), (e) => e.code === "project_membership_unavailable");
   assert.deepEqual(fetched, [], "no value fetch happened");
-  const selectedOnly = await readBsmSnapshot(sdk, org, [{ projectId: P1, mode: "selected", secretIds: [S1] }]);
-  assert.deepEqual(fetched, [[S1]], "selected-only reads only the chosen ID");
+  // Selected mode needs membership before any value request too: unknown membership fails closed with zero reads.
+  await assert.rejects(() => readBsmSnapshot(sdk, org, [{ projectId: P1, mode: "selected", secretIds: [S1] }]), (e) => e.code === "project_membership_unavailable");
+  assert.deepEqual(fetched, [], "selected mode with unknown membership read no value");
+  // With membership metadata (future SDK), only IDs listed in the chosen project are fetched.
+  const withHints = sdkFixture({ hints: true });
+  const selectedOnly = await readBsmSnapshot(withHints.sdk, org, [{ projectId: P1, mode: "selected", secretIds: [S1] }]);
+  assert.deepEqual(withHints.fetched, [[S1]], "selected-only reads only the chosen ID");
   assert.deepEqual(ids(selectedOnly), [S1]);
 });
 
@@ -330,7 +335,8 @@ test("manual secret IDs: editor renders labels, feedback and honest membership w
   assert.match(filled, new RegExp(`aria-label="Remove secret ${S1} from Prod"`));
   assert.match(filled, /aria-label="Secrets selected in Prod"/);
   assert.match(filled, /not checked against the project when you save/);
-  assert.match(filled, /skips any that is not in this project/);
+  assert.match(filled, /sync is not available for this project and nothing is read/);
+  assert.doesNotMatch(filled, /skips any|checks each secret at run time/i, "no false usable-sync claim");
   assert.match(empty, /No secrets chosen for Prod\. Add at least one secret UUID before saving\./);
   assert.doesNotMatch(filled + empty, /Reload secret|Load secret names|Find secrets|verified in this project/i, "no unsupported discovery controls");
   assert.match(filled, /<button[^>]*disabled=""[^>]*>Add secret<\/button>/, "Add is disabled while the field is empty");
@@ -339,6 +345,7 @@ test("manual secret IDs: editor renders labels, feedback and honest membership w
 test("UI copy: whole-project limitation and unsupported discovery are stated honestly", () => {
   const e = ui.errorCopy("project_membership_unavailable");
   assert.match(e.title, /not available/i);
+  assert.match(e.action, /selected and whole-project/i);
   assert.match(e.action, /nothing was read/i);
   assert.doesNotMatch(ui.errorCopy("secret_selection_invalid").action, /reload|tick/i);
   assert.deepEqual(ui.copyCoverage(), []);

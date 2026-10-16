@@ -90,7 +90,7 @@ export async function createAuthenticatedBitwardenSdk(token: string, region: "US
     apiUrl: `https://api.bitwarden${suffix}`,
     identityUrl: `https://identity.bitwarden${suffix}`,
     deviceType: sdk.DeviceType.SDK,
-    userAgent: "paperclip-plugin-bitwarden-secrets-manager-sync/0.1.0",
+    userAgent: "paperclip-plugin-bitwarden-secrets-manager-sync/0.1.1",
   }, 4 as LogLevel);
   try {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -110,9 +110,9 @@ export async function createAuthenticatedBitwardenSdk(token: string, region: "US
 /**
  * Read the in-scope source values before exposing a snapshot to diff/apply code.
  * `selection` is a per-project union; a plain Set means whole-project for each ID (legacy).
- * Values are fetched only for IDs that can still be in scope: with no whole-project entry
- * and no project hint from the list, only explicitly selected IDs are requested. The SDK list
- * call returns no project, so whole-project entries must fetch to learn each secret's project.
+ * Values are fetched only for IDs whose project membership is known from list metadata and admitted by
+ * the selection. When the list carries no project (SDK 1.0.0), whole, legacy, mixed and selected
+ * scopes all fail closed with project_membership_unavailable before any value request.
  */
 export async function readBsmSnapshot(
   sdk: BsmSdk,
@@ -145,14 +145,13 @@ export async function readBsmSnapshot(
     }
 
     if (listed.length > 500) throw new AdapterError("snapshot_incomplete");
-    // A whole-project entry needs each secret's project before any value is read. SDK 1.0.0 list rows carry
-    // no project, so reading values to learn it would over-read other projects. Fail closed instead.
-    if (hasWholeProject && listed.some(row => row.projectId === undefined)) throw new AdapterError("project_membership_unavailable");
-    // Filter before fetching values wherever the list metadata permits it.
-    const candidates = listed.filter(row => {
-      if (row.projectId !== undefined) return selectionAdmits(entries, row.projectId, row.id);
-      return hasWholeProject || selectedIds.has(row.id.toLowerCase());
-    });
+    // Membership must come from list metadata before ANY value request, for selected IDs too. SDK 1.0.0 list
+    // rows carry no project, and a value read to learn it would decrypt out-of-project secrets. Fail closed.
+    // Never infer scope from the token, the organization listing or the operator-entered ID.
+    const needsMembership = (row: { id: string }) => hasWholeProject || selectedIds.has(row.id.toLowerCase());
+    if (listed.some(row => row.projectId === undefined && needsMembership(row))) throw new AdapterError("project_membership_unavailable");
+    // Rows with known membership are admitted or rejected here, so out-of-project IDs are never fetched.
+    const candidates = listed.filter(row => row.projectId !== undefined && selectionAdmits(entries, row.projectId, row.id));
     const ids = candidates.map(row => row.id);
     const records: SelectedBsmSecret[] = [];
     let complete = true;

@@ -217,7 +217,8 @@ const sameSelection = (a: BsmConfig, b: BsmConfig) => {
 /**
  * Selected-secret entries are checked against Bitwarden metadata before they are saved: each project must be
  * visible and each ID must be listed. No secret value is read. Project membership is not available as
- * metadata, so it is enforced at sync time, where a selected ID outside its project is skipped.
+ * metadata on the current SDK, so selected and whole-project sync both fail closed before any value read
+ * (project_membership_unavailable). With membership metadata, sync rejects out-of-project IDs before fetching.
  * Unverifiable means rejected. Unchanged selections are not re-checked, so token rotation never depends on it.
  */
 async function verifySelection(dependencies: SettingsDependencies, next: BsmConfig, old: BsmConfig, getToken: () => Promise<string>): Promise<string | null> {

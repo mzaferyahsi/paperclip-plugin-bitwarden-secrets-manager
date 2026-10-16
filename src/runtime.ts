@@ -4,7 +4,7 @@ import { createAuthenticatedBitwardenSdk } from "./adapters/bitwarden.js";
 import { AdapterError, type HttpRequest, type HttpResponse, type HttpTransport } from "./adapters/types.js";
 import { PaperclipSecretsAdapter } from "./adapters/paperclip.js";
 import { AUTHORIZATION_BLOCKED } from "./error-codes.js";
-import { syncCompany, type SyncState } from "./sync.js";
+import { rateLimitBackoffMs, syncCompany, type SyncState } from "./sync.js";
 import type { BsmSdk } from "./adapters/types.js";
 
 import { STATE_KEY } from "./error-codes.js";
@@ -123,6 +123,8 @@ async function syncCompanies(ctx: PluginContext, job: PluginJobContext | null, o
         continue;
       }
       await writeStatus(ctx, companyId, { scheduledAnchor: scheduledAt });
+      // syncCompany saves from this local copy; without the anchor the run's save would erase it.
+      state = { ...state, scheduledAnchor: scheduledAt };
     }
     const configError = validateConfig(config);
     const attemptAt = new Date().toISOString();
@@ -171,7 +173,7 @@ async function syncCompanies(ctx: PluginContext, job: PluginJobContext | null, o
     } catch (error) {
       const errorCode = error instanceof AdapterError ? error.code : "remote_unavailable";
       const retryAfter = error instanceof AdapterError ? error.retryAfterMs : undefined;
-      const backoff = errorCode === "paperclip_rate_limited" ? Math.min(60 * 60_000, Math.max(60_000, retryAfter ?? 5 * 60_000)) :
+      const backoff = errorCode === "paperclip_rate_limited" ? rateLimitBackoffMs(retryAfter) :
         ["remote_unavailable", "paperclip_unavailable", "ambiguous_write"].includes(errorCode) ? Math.min(60 * 60_000, 60_000 * (2 ** Math.min(6, Number(state.generation ?? 0)))) : undefined;
       await writeStatus(ctx, companyId, {
         lastAttemptAt: attemptAt, status: AUTHORIZATION_BLOCKED.has(errorCode) || errorCode.startsWith("paperclip_credential") ? "configuration_required" : "partial",
@@ -230,7 +232,12 @@ export function buildStatus(config: BsmConfig, state: State, nowMs = Date.now())
   const enabled = config.enabled === true;
   const configError = validateConfig(config, false);
   const configured = configError === null;
-  const errorCode = state.errorCode ?? (configured ? null : configError);
+  // A scope that was never saved (neither key present) is not a malformed scope: while sync is off the Scope step says
+  // "choose at least one project", so do not surface the legacy-list error. `configured` stays false (fail closed) and
+  // set-enabled still refuses.
+  const scopeUnset = config.bsmProjectSelections === undefined && config.bsmProjectIds === undefined;
+  const hideUnsetScope = configError === "project_allowlist_invalid" && scopeUnset && !enabled;
+  const errorCode = state.errorCode ?? (configured || hideUnsetScope ? null : configError);
   let nextEligibleAt: string | null = null;
   if (enabled && !(state.errorCode && AUTHORIZATION_BLOCKED.has(state.errorCode))) {
     const backoff = dateMillis(state.nextEligibleAt);

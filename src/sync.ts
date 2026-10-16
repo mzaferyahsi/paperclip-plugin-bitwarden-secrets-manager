@@ -74,6 +74,11 @@ function destinationKey(config: BsmConfig, orgId: string, sourceId: string): str
   return key;
 }
 
+/** Retry-After, bounded to [1 minute, 1 hour]; five minutes when the host gave none. */
+export function rateLimitBackoffMs(retryAfterMs?: number): number {
+  return Math.min(60 * 60_000, Math.max(60_000, retryAfterMs ?? 5 * 60_000));
+}
+
 function safeErrorCode(error: unknown): string {
   return error instanceof AdapterError ? error.code : "remote_unavailable";
 }
@@ -120,7 +125,7 @@ export async function syncCompany(config: BsmConfig, ports: SyncPorts): Promise<
     .filter(item => item.phase === "planned").map(item => [item.sourceId, item]));
   const keyOwners = new Map<string, string>();
   let skippedArchived = 0;
-  const candidates: Array<{ source: (typeof snapshot.secrets)[number]; target?: NativeSecret; action: "create" | "rotate" | "metadata" | "none"; drift?: boolean }> = [];
+  const candidates: Array<{ source: (typeof snapshot.secrets)[number]; target?: NativeSecret; action: "create" | "rotate" | "metadata" | "none"; drift?: boolean; recoveredRotate?: number }> = [];
   for (const source of snapshot.secrets) {
     const key = destinationKey(config, orgId, source.id);
     const name = displayName(source.key, source.id);
@@ -140,13 +145,19 @@ export async function syncCompany(config: BsmConfig, ports: SyncPorts): Promise<
     let action: "rotate" | "metadata" | "none" = revisionChanged || versionDrift
       ? "rotate" : metadata?.bsmProjectId !== source.projectId || existing.name !== displayName(source.key, source.id) ? "metadata" : "none";
     const pending = pendingJournal.get(source.id);
-    const priorVersion = pending?.responseVersion ?? pending?.priorVersion;
-    if (pending?.action === "rotate" && existing.latestVersion !== undefined && priorVersion !== undefined && existing.latestVersion > priorVersion) {
-      // A prior rotate may have committed before its response was lost. The newer
-      // native version proves the value write landed; finish metadata without replay.
-      action = "metadata";
+    let recoveredRotate: number | undefined;
+    // The marker only vouches for the exact write it recorded: same source revision and same destination.
+    // Otherwise (source moved on, or the destination was replaced) rotate normally.
+    if (pending?.action === "rotate" && existing.latestVersion !== undefined &&
+      pending.sourceRevision === source.revisionDate && pending.destinationId === existing.id) {
+      // A prior rotate may have committed before its response was lost. A native version newer than the
+      // pre-rotate version (or at least the version the re-list already recorded) proves the value write
+      // landed; finish metadata without replay.
+      const landed = (pending.responseVersion !== undefined && existing.latestVersion >= pending.responseVersion) ||
+        (pending.priorVersion !== undefined && existing.latestVersion > pending.priorVersion);
+      if (landed) { action = "metadata"; recoveredRotate = existing.latestVersion; }
     }
-    candidates.push({ source, target: existing, action, drift: action === "rotate" && !revisionChanged });
+    candidates.push({ source, target: existing, action, drift: action === "rotate" && !revisionChanged, recoveredRotate });
   }
 
   const startedAt = now();
@@ -154,7 +165,7 @@ export async function syncCompany(config: BsmConfig, ports: SyncPorts): Promise<
   const summary: RunSummary = { sourceCount: snapshot.secrets.length, created: 0, rotated: 0, nativeDriftCorrected: 0, metadataUpdated: 0,
     unchanged: candidates.filter(c => c.action === "none" && c.target?.status === "active").length, archived: 0, skippedArchived, failed: snapshot.skippedCount };
   const generation = (ports.generation ?? 0) + 1;
-  const state: SyncState = { ...(ports.previousState ?? {}), generation, status: "applying", errorCode: undefined,
+  const state: SyncState = { ...(ports.previousState ?? {}), generation, status: "applying", errorCode: undefined, nextEligibleAt: undefined,
     configFingerprint: fingerprint, removalFingerprint, itemJournal: [],
     ...(configChanged ? { absenceEvidence: {}, warningCode: "removal_scope_changed" } : {}),
     lastAttemptAt: new Date(now()).toISOString() };
@@ -165,10 +176,15 @@ export async function syncCompany(config: BsmConfig, ports: SyncPorts): Promise<
   let budgetExpired = ports.deadlineAt !== undefined && now() >= ports.deadlineAt;
   for (const candidate of candidates) {
     if (ports.deadlineAt !== undefined && now() >= ports.deadlineAt) { budgetExpired = true; break; }
-    const { source, target, action, drift } = candidate;
+    const { source, target, action, drift, recoveredRotate } = candidate;
     if (action === "none") continue;
-    const item: JournalItem = { sourceId: source.id, action, sourceRevision: source.revisionDate,
-      ...(target ? { destinationId: target.id } : {}), ...(target?.latestVersion ? { priorVersion: target.latestVersion } : {}), phase: "planned" };
+    // A recovered rotate keeps its "rotate" journal entry (with the landed version) until metadata succeeds,
+    // so a second failed metadata step cannot make the next run replay the value write.
+    const item: JournalItem = recoveredRotate !== undefined
+      ? { sourceId: source.id, action: "rotate", sourceRevision: source.revisionDate, destinationId: target!.id, responseVersion: recoveredRotate, phase: "planned" }
+      : { sourceId: source.id, action, sourceRevision: source.revisionDate,
+        ...(target ? { destinationId: target.id } : {}), ...(target?.latestVersion ? { priorVersion: target.latestVersion } : {}), phase: "planned" };
+    if (recoveredRotate !== undefined) versions[source.id] = recoveredRotate;
     state.itemJournal = [...(state.itemJournal ?? []), item];
     await ports.save(state);
     try {
@@ -201,6 +217,7 @@ export async function syncCompany(config: BsmConfig, ports: SyncPorts): Promise<
       counts.failed++; summary.failed++;
       state.status = "partial";
       state.errorCode = safeErrorCode(error);
+      if (error instanceof AdapterError && error.code === "paperclip_rate_limited") state.nextEligibleAt = new Date(now() + rateLimitBackoffMs(error.retryAfterMs)).toISOString();
       await ports.save(state);
       break;
     }
@@ -235,6 +252,7 @@ export async function syncCompany(config: BsmConfig, ports: SyncPorts): Promise<
           hadFailure = true;
           counts.failed++; summary.failed++;
           state.errorCode = safeErrorCode(error);
+          if (error instanceof AdapterError && error.code === "paperclip_rate_limited") state.nextEligibleAt = new Date(now() + rateLimitBackoffMs(error.retryAfterMs)).toISOString();
           await ports.save(state);
           break;
         }
@@ -254,7 +272,7 @@ export async function syncCompany(config: BsmConfig, ports: SyncPorts): Promise<
   state.status = hadFailure || budgetExpired ? "partial" : snapshot.complete ? "success" : "partial";
   if (budgetExpired && !state.errorCode) state.errorCode = "time_budget_exhausted";
   if (!snapshot.complete && !state.errorCode) state.errorCode = "snapshot_incomplete";
-  if (!hadFailure && snapshot.complete) state.lastSuccessAt = new Date(now()).toISOString();
+  if (!hadFailure && !budgetExpired && snapshot.complete) state.lastSuccessAt = new Date(now()).toISOString();
   state.itemJournal = (state.itemJournal ?? []).filter(item => item.phase !== "applied");
   await ports.save(state);
   void mutations;

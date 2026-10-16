@@ -39,7 +39,20 @@ test("BWSM snapshot fetches complete selected values and rejects partial batches
   // The real SDK list carries no project, so whole-project scope fails closed before any value read.
   await assert.rejects(() => readBsmSnapshot(wrapped, "org-1", new Set(["project-1"])),
     (error: unknown) => error instanceof AdapterError && error.code === "project_membership_unavailable");
-  assert.deepEqual((await readBsmSnapshot(wrapped, "org-1", [{ projectId: "project-1", mode: "selected", secretIds: [source.id] }])).secrets, [source]);
+  // Selected mode needs membership before any value request too: no project in the list means fail closed, zero reads.
+  let reads = 0;
+  const noMembership = { listSecretIds: async () => [{ id: source.id, organizationId: "org-1" }], getSecrets: async () => { reads++; return [source]; } };
+  await assert.rejects(() => readBsmSnapshot(noMembership, "org-1", [{ projectId: "project-1", mode: "selected", secretIds: [source.id] }]),
+    (error: unknown) => error instanceof AdapterError && error.code === "project_membership_unavailable");
+  assert.equal(reads, 0);
+  // A membership-bearing list admits only IDs in the chosen project; a wrong-project ID is never fetched.
+  const withMembership = { listSecretIds: async () => [
+    { id: source.id, organizationId: "org-1", projectId: "project-1" },
+    { id: "source-2", organizationId: "org-1", projectId: "project-2" },
+  ], getSecrets: async (ids: readonly string[]) => { reads += ids.length; return ids.map(() => source); } };
+  const sel = (ids: string[]) => [{ projectId: "project-1", mode: "selected" as const, secretIds: ids }];
+  assert.deepEqual((await readBsmSnapshot(withMembership, "org-1", sel([source.id, "source-2"]))).secrets, [source]);
+  assert.equal(reads, 1, "source-2 belongs to project-2 and was never requested");
   await assert.rejects(() => readBsmSnapshot({ ...sdk, getSecrets: async () => [] }, "org-1", new Set(["project-1"])),
     (error: unknown) => error instanceof AdapterError && error.code === "snapshot_incomplete");
   const whitespaceSnapshot = await readBsmSnapshot({
