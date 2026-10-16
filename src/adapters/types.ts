@@ -5,12 +5,15 @@ export type AdapterErrorCode =
   | "paperclip_permission_denied"
   | "paperclip_rate_limited"
   | "paperclip_unavailable"
+  | "bsm_credential_rejected"
+  | "bsm_permission_denied"
   | "remote_unavailable"
   | "snapshot_incomplete"
   | "identity_mismatch"
   | "ownership_mismatch"
   | "ambiguous_write"
-  | "invalid_input";
+  | "invalid_input"
+  | "selected_project_missing";
 
 export class AdapterError extends Error {
   readonly code: AdapterErrorCode;
@@ -29,7 +32,8 @@ export class AdapterError extends Error {
 export interface BsmSecret {
   id: string;
   organizationId: string;
-  projectId: string | null;
+  /** null = the secret has no project; undefined = Bitwarden did not report one (unselectable, never guessed). */
+  projectId?: string | null;
   key: string;
   value: string;
   revisionDate: string;
@@ -48,6 +52,19 @@ export interface BsmSdk {
   listSecretIds(organizationId: string): Promise<readonly BsmSecretSummary[]>;
   getSecrets(ids: readonly string[]): Promise<readonly BsmSecret[]>;
   listProjects?(organizationId: string): Promise<readonly { id: string; organizationId: string; name?: string }[]>;
+}
+
+/** Value-free discovery result: the only form of discovery data that leaves the adapter. */
+export interface BsmCatalogue {
+  projects: { id: string; name: string | null; secretCount: number }[];
+  secrets: { id: string; key: string; projectId: string; selectable: true }[];
+  /** Secrets whose project Bitwarden did not report. Listed by key; never selectable. */
+  unselectable: { id: string; key: string }[];
+  /** false = the time budget ran out or a batch kept failing: the lists above are a subset, never the whole. */
+  complete: boolean;
+  /** True totals as listed by Bitwarden, and how many were actually read. Equal when complete. */
+  listedCount: number;
+  readCount: number;
 }
 
 export interface BsmSnapshot {

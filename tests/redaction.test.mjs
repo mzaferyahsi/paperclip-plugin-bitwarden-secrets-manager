@@ -48,7 +48,7 @@ test("runtime HTTP bridge sends fixture auth/value only in the request and emits
   const activity = [];
   const spanRecords = [];
   const ctx = {
-    jobs: { register() {} }, data: { register() {} }, actions: { register(_name, handler) { ctx.resync = handler; } },
+    jobs: { register(_key, handler) { ctx.job = handler; } }, data: { register() {} }, actions: { register() {} },
     companies: { list: async () => [{ id: companyId }], get: async () => ({ id: companyId }) },
     config: { get: async () => config },
     state: {
@@ -57,6 +57,7 @@ test("runtime HTTP bridge sends fixture auth/value only in the request and emits
     },
     secrets: { resolve: async (_ref, options) => options.configPath === "bsmAccessToken" ? fixtureToken : "fixture-paperclip-credential" },
     activity: { log: async (entry) => activity.push(entry) },
+    logger: { error() {}, info() {}, warn() {}, debug() {} },
     tracer: { startSpan() { throw new Error("runtime must not create spans for HTTP payloads"); }, record: async (record) => spanRecords.push(record) },
     http: { fetch: async (url, init) => {
       calls.push({ url, init });
@@ -69,15 +70,17 @@ test("runtime HTTP bridge sends fixture auth/value only in the request and emits
   registerRuntime(ctx, {
     createSdk: async () => ({
       listProjects: async () => [{ id: config.bsmProjectIds[0], organizationId: config.bsmOrganizationId }],
-      listSecretIds: async () => [{ id: "source-uuid", organizationId: config.bsmOrganizationId }],
+      listSecretIds: async () => [{ id: "source-uuid", organizationId: config.bsmOrganizationId, projectId: config.bsmProjectIds[0] }],
       getSecrets: async () => [{
         id: "source-uuid", organizationId: config.bsmOrganizationId, projectId: config.bsmProjectIds[0],
         key: "fixture", value: fixtureValue, revisionDate: "2026-10-11T00:00:00.000Z",
       }],
     }),
   });
-  const result = await ctx.resync({}, { actor: { type: "user", userId: "operator" }, companyId });
-  assert.equal(result.status, "ok");
+  await ctx.job({ jobKey: "bsm-sync", runId: "run", trigger: "schedule", scheduledAt: "2026-01-01T00:00:00.000Z" });
+  const result = state.get(`${companyId}/runtime`).lastRunSummary;
+  assert.deepEqual(result, { sourceCount: 1, created: 1, rotated: 0, nativeDriftCorrected: 0, metadataUpdated: 0, unchanged: 0, archived: 0, skippedArchived: 0, failed: 0 });
+  assert.equal(Object.values(result).every(Number.isInteger), true);
   assert.equal(calls.length, 2);
   assert.match(calls[1].init.headers.Authorization, /^Bearer fixture-paperclip-credential$/);
   assert.equal(calls[1].init.body.includes(fixtureValue), true);

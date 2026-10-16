@@ -127,7 +127,7 @@ test("save-settings keeps the existing token ref, stays disabled, and requires a
   assert.equal(saved.enabled, false);
   assert.equal(saved.syncIntervalMinutes, 30);
   const none = harness();
-  assert.deepEqual(await none.actions["save-settings"]({ companyId, settings }, actorContext), { ok: false, errorCode: "bsm_credential_required" });
+  assert.deepEqual(await none.actions["save-settings"]({ companyId, settings }, actorContext), { ok: false, errorCode: "bsm_credential_required", field: null });
 });
 
 test("replacing the token creates a new secret and switches the ref", async () => {

@@ -15,8 +15,14 @@ await build({
 await build({
   entryPoints: ["src/settings-actions.ts"], bundle: true, platform: "node", format: "esm",
   outfile: ".test-build/settings-actions.js", target: "node24", sourcemap: false,
+  external: ["@bitwarden/sdk-napi", "@bitwarden/sdk-napi-linux-x64-gnu"],
 });
-for (const [entry, out] of [["src/overview.ts", "overview.js"], ["src/messages.ts", "messages.js"], ["src/adapters/types.ts", "adapters/types.js"]]) {
+await build({
+  entryPoints: ["src/ui/index.tsx"], bundle: true, platform: "node", format: "esm", jsx: "automatic",
+  outfile: ".test-build/ui.mjs", target: "node24", sourcemap: false,
+  external: ["react", "react/jsx-runtime", "@paperclipai/plugin-sdk/ui"],
+});
+for (const [entry, out] of [["src/overview.ts", "overview.js"], ["src/messages.ts", "messages.js"], ["src/error-codes.ts", "error-codes.js"], ["src/adapters/types.ts", "adapters/types.js"]]) {
   await build({
     entryPoints: [entry], bundle: true, platform: "node", format: "esm",
     outfile: `.test-build/${out}`, target: "node24", sourcemap: false,
@@ -31,5 +37,10 @@ await build({
 await build({
   entryPoints: ["tests/sync.test.ts"], bundle: true, platform: "node", format: "esm",
   outfile: ".test-build/sync.test.mjs", target: "node24", sourcemap: false,
+  external: ["@bitwarden/sdk-napi", "@bitwarden/sdk-napi-linux-x64-gnu"],
+});
+await build({
+  entryPoints: ["tests/selection-sync.test.ts"], bundle: true, platform: "node", format: "esm",
+  outfile: ".test-build/selection-sync.test.mjs", target: "node24", sourcemap: false,
   external: ["@bitwarden/sdk-napi", "@bitwarden/sdk-napi-linux-x64-gnu"],
 });

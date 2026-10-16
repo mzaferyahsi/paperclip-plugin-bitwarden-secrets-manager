@@ -1,0 +1,25 @@
+# Generated output and dependencies
+.graphify-out/
+graphify-out/
+node_modules/
+dist/
+.test-build/
+*.tgz
+
+# Generated and local-only files
+.env*
+**/.env
+**/.env.*
+**/*credentials*
+**/*secret*
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.crt
+**/*.cer
+**/id_rsa*
+**/id_ed25519*
+**/*kubeconfig*
+**/.kube/**
+coverage/

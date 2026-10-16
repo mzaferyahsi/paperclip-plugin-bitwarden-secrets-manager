@@ -20,5 +20,5 @@ await build({
 });
 await build({
   entryPoints: ["src/ui/index.tsx"], bundle: true, platform: "browser", format: "esm",
-  outfile: "dist/ui.js", target: "es2022", jsx: "automatic", external: ["react", "react-dom", "react/jsx-runtime"],
+  outfile: "dist/ui/index.js", target: "es2022", jsx: "automatic", external: ["react", "react-dom", "react/jsx-runtime"],
 });

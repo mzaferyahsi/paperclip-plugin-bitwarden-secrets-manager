@@ -1,10 +1,9 @@
 import { AdapterError, type BsmSnapshot, type BsmSdk, type NativeSecret, type SecretOwnership } from "./adapters/types.js";
 import { readBsmSnapshot } from "./adapters/bitwarden.js";
 import { ownershipMatches, PaperclipSecretsAdapter, sourceIdentityKey } from "./adapters/paperclip.js";
-import type { BsmConfig } from "./config.js";
+import { canonicalSelection, normalizeSelection, selectionAdmits, type BsmConfig, type ProjectSelection } from "./config.js";
 
 const OWNER = "mzaferyahsi.bitwarden-secrets-manager-sync" as const;
-const MAX_SECRETS = 500;
 export type JournalItem = {
   sourceId: string; action: "create" | "rotate" | "metadata" | "archive";
   sourceRevision: string; destinationId?: string; priorVersion?: number;
@@ -14,11 +13,16 @@ export type SyncState = {
   generation: number; status: string; errorCode?: string; warningCode?: string;
   lastAttemptAt?: string; lastSuccessAt?: string; configFingerprint?: string; removalFingerprint?: string;
   scheduledAnchor?: string; nextEligibleAt?: string; runtimeRefIds?: string[];
-  processedCompanies?: number; itemJournal?: JournalItem[];
+  itemJournal?: JournalItem[];
   destinationVersions?: Record<string, number>; absenceEvidence?: Record<string, { fingerprint: string; count: number }>;
-  lastDurationMs?: number; counts?: SyncCounts; projectNames?: Record<string, string>;
+  lastDurationMs?: number; counts?: SyncCounts; lastRunSummary?: RunSummary; projectNames?: Record<string, string>;
 };
 export type SyncCounts = { read: number; created: number; updated: number; unchanged: number; archived: number; failed: number };
+/** Integers only: no names, keys or IDs (ADR-BSM-002 §3). */
+export type RunSummary = {
+  sourceCount: number; created: number; rotated: number; nativeDriftCorrected: number; metadataUpdated: number;
+  unchanged: number; archived: number; skippedArchived: number; failed: number;
+};
 export type SyncPorts = {
   sdk: BsmSdk;
   native: PaperclipSecretsAdapter;
@@ -32,10 +36,18 @@ export type SyncPorts = {
   now?: () => number;
 };
 
-function configFingerprint(config: BsmConfig): string {
+/** Fail closed: an invalid or conflicting selection never widens to the whole organization. */
+function selectionOf(config: BsmConfig): ProjectSelection[] {
+  const result = normalizeSelection(config);
+  if (!result.ok) throw new AdapterError("invalid_input");
+  return result.entries;
+}
+
+function configFingerprint(config: BsmConfig, entries: readonly ProjectSelection[]): string {
   return JSON.stringify({
     organization: config.bsmOrganizationId,
-    projects: [...(config.bsmProjectIds as string[])].sort(),
+    // Whole-project-only scopes keep the pre-selection fingerprint so upgrades do not reset removal evidence.
+    projects: entries.every((e) => e.mode === "all") ? entries.map((e) => e.projectId).sort() : canonicalSelection(entries),
     prefix: config.targetSecretKeyPrefix ?? "bitwarden.",
     sourceRef: (config.bsmAccessToken as { secretId?: string } | undefined)?.secretId ?? null,
   });
@@ -61,6 +73,11 @@ function destinationKey(config: BsmConfig, orgId: string, sourceId: string): str
   return key;
 }
 
+/** Retry-After, bounded to [1 minute, 1 hour]; five minutes when the host gave none. */
+export function rateLimitBackoffMs(retryAfterMs?: number): number {
+  return Math.min(60 * 60_000, Math.max(60_000, retryAfterMs ?? 5 * 60_000));
+}
+
 function safeErrorCode(error: unknown): string {
   return error instanceof AdapterError ? error.code : "remote_unavailable";
 }
@@ -71,6 +88,7 @@ function safeErrorCode(error: unknown): string {
  */
 export async function syncCompany(config: BsmConfig, ports: SyncPorts): Promise<SyncState> {
   const now = ports.now ?? Date.now;
+  const selection = selectionOf(config);
   const previous = (await ports.native.list()).slice();
   const inventoryIds = new Set<string>();
   const inventoryKeys = new Set<string>();
@@ -79,13 +97,12 @@ export async function syncCompany(config: BsmConfig, ports: SyncPorts): Promise<
     inventoryIds.add(row.id);
     inventoryKeys.add(row.key);
   }
-  const fingerprint = configFingerprint(config);
+  const fingerprint = configFingerprint(config, selection);
   const configChanged = ports.stateFingerprint !== undefined && ports.stateFingerprint !== fingerprint;
   if (configChanged) ports.absenceEvidence = {};
   const removalFingerprint = ports.previousState?.removalFingerprint ?? ports.stateFingerprint ?? fingerprint;
   const fingerprintUnchanged = ports.stateFingerprint === fingerprint && removalFingerprint === fingerprint;
-  const snapshot = await readBsmSnapshot(ports.sdk, String(config.bsmOrganizationId), new Set(config.bsmProjectIds as string[]), 100);
-  if (snapshot.secrets.length > MAX_SECRETS) throw new AdapterError("snapshot_incomplete");
+  const snapshot = await readBsmSnapshot(ports.sdk, String(config.bsmOrganizationId), selection, 100);
 
   const orgId = String(config.bsmOrganizationId);
   const owned = previous.filter(secret => {
@@ -105,7 +122,8 @@ export async function syncCompany(config: BsmConfig, ports: SyncPorts): Promise<
   const pendingJournal = new Map((ports.previousState?.itemJournal ?? [])
     .filter(item => item.phase === "planned").map(item => [item.sourceId, item]));
   const keyOwners = new Map<string, string>();
-  const candidates: Array<{ source: (typeof snapshot.secrets)[number]; target?: NativeSecret; action: "create" | "rotate" | "metadata" | "none" }> = [];
+  let skippedArchived = 0;
+  const candidates: Array<{ source: (typeof snapshot.secrets)[number]; target?: NativeSecret; action: "create" | "rotate" | "metadata" | "none"; drift?: boolean; recoveredRotate?: number }> = [];
   for (const source of snapshot.secrets) {
     const key = destinationKey(config, orgId, source.id);
     const name = displayName(source.key, source.id);
@@ -118,25 +136,34 @@ export async function syncCompany(config: BsmConfig, ports: SyncPorts): Promise<
     if (priorKeyOwner && priorKeyOwner !== source.id) throw new AdapterError("snapshot_incomplete");
     keyOwners.set(key, source.id);
     if (!existing) { candidates.push({ source, action: "create" }); continue; }
-    if (existing.status !== "active") { candidates.push({ source, target: existing, action: "none" }); continue; }
+    if (existing.status !== "active") { skippedArchived++; candidates.push({ source, target: existing, action: "none" }); continue; }
     const metadata = existing.providerMetadata as Partial<SecretOwnership> | undefined;
-    let action: "rotate" | "metadata" | "none" = metadata?.sourceRevision !== source.revisionDate ||
-      (existing.latestVersion !== undefined && ports.destinationVersions?.[source.id] !== undefined && existing.latestVersion !== ports.destinationVersions[source.id])
+    const revisionChanged = metadata?.sourceRevision !== source.revisionDate;
+    const versionDrift = existing.latestVersion !== undefined && ports.destinationVersions?.[source.id] !== undefined && existing.latestVersion !== ports.destinationVersions[source.id];
+    let action: "rotate" | "metadata" | "none" = revisionChanged || versionDrift
       ? "rotate" : metadata?.bsmProjectId !== source.projectId || existing.name !== displayName(source.key, source.id) ? "metadata" : "none";
     const pending = pendingJournal.get(source.id);
-    const priorVersion = pending?.responseVersion ?? pending?.priorVersion;
-    if (pending?.action === "rotate" && existing.latestVersion !== undefined && priorVersion !== undefined && existing.latestVersion > priorVersion) {
-      // A prior rotate may have committed before its response was lost. The newer
-      // native version proves the value write landed; finish metadata without replay.
-      action = "metadata";
+    let recoveredRotate: number | undefined;
+    // The marker only vouches for the exact write it recorded: same source revision and same destination.
+    // Otherwise (source moved on, or the destination was replaced) rotate normally.
+    if (pending?.action === "rotate" && existing.latestVersion !== undefined &&
+      pending.sourceRevision === source.revisionDate && pending.destinationId === existing.id) {
+      // A prior rotate may have committed before its response was lost. A native version newer than the
+      // pre-rotate version (or at least the version the re-list already recorded) proves the value write
+      // landed; finish metadata without replay.
+      const landed = (pending.responseVersion !== undefined && existing.latestVersion >= pending.responseVersion) ||
+        (pending.priorVersion !== undefined && existing.latestVersion > pending.priorVersion);
+      if (landed) { action = "metadata"; recoveredRotate = existing.latestVersion; }
     }
-    candidates.push({ source, target: existing, action });
+    candidates.push({ source, target: existing, action, drift: action === "rotate" && !revisionChanged, recoveredRotate });
   }
 
   const startedAt = now();
   const counts: SyncCounts = { read: snapshot.secrets.length, created: 0, updated: 0, unchanged: candidates.filter(c => c.action === "none").length, archived: 0, failed: snapshot.skippedCount };
+  const summary: RunSummary = { sourceCount: snapshot.secrets.length, created: 0, rotated: 0, nativeDriftCorrected: 0, metadataUpdated: 0,
+    unchanged: candidates.filter(c => c.action === "none" && c.target?.status === "active").length, archived: 0, skippedArchived, failed: snapshot.skippedCount };
   const generation = (ports.generation ?? 0) + 1;
-  const state: SyncState = { ...(ports.previousState ?? {}), generation, status: "applying", errorCode: undefined,
+  const state: SyncState = { ...(ports.previousState ?? {}), generation, status: "applying", errorCode: undefined, nextEligibleAt: undefined,
     configFingerprint: fingerprint, removalFingerprint, itemJournal: [],
     ...(configChanged ? { absenceEvidence: {}, warningCode: "removal_scope_changed" } : {}),
     lastAttemptAt: new Date(now()).toISOString() };
@@ -147,10 +174,15 @@ export async function syncCompany(config: BsmConfig, ports: SyncPorts): Promise<
   let budgetExpired = ports.deadlineAt !== undefined && now() >= ports.deadlineAt;
   for (const candidate of candidates) {
     if (ports.deadlineAt !== undefined && now() >= ports.deadlineAt) { budgetExpired = true; break; }
-    const { source, target, action } = candidate;
+    const { source, target, action, drift, recoveredRotate } = candidate;
     if (action === "none") continue;
-    const item: JournalItem = { sourceId: source.id, action, sourceRevision: source.revisionDate,
-      ...(target ? { destinationId: target.id } : {}), ...(target?.latestVersion ? { priorVersion: target.latestVersion } : {}), phase: "planned" };
+    // A recovered rotate keeps its "rotate" journal entry (with the landed version) until metadata succeeds,
+    // so a second failed metadata step cannot make the next run replay the value write.
+    const item: JournalItem = recoveredRotate !== undefined
+      ? { sourceId: source.id, action: "rotate", sourceRevision: source.revisionDate, destinationId: target!.id, responseVersion: recoveredRotate, phase: "planned" }
+      : { sourceId: source.id, action, sourceRevision: source.revisionDate,
+        ...(target ? { destinationId: target.id } : {}), ...(target?.latestVersion ? { priorVersion: target.latestVersion } : {}), phase: "planned" };
+    if (recoveredRotate !== undefined) versions[source.id] = recoveredRotate;
     state.itemJournal = [...(state.itemJournal ?? []), item];
     await ports.save(state);
     try {
@@ -174,14 +206,16 @@ export async function syncCompany(config: BsmConfig, ports: SyncPorts): Promise<
         await ports.native.updateMetadata(target.id, displayName(source.key, source.id), providerMetadata);
       }
       item.phase = "applied";
-      if (action === "create") counts.created++; else counts.updated++;
+      if (action === "create") { counts.created++; summary.created++; }
+      else { counts.updated++; if (action === "metadata") summary.metadataUpdated++; else if (drift) summary.nativeDriftCorrected++; else summary.rotated++; }
       mutations++;
       await ports.save(state);
     } catch (error) {
       hadFailure = true;
-      counts.failed++;
+      counts.failed++; summary.failed++;
       state.status = "partial";
       state.errorCode = safeErrorCode(error);
+      if (error instanceof AdapterError && error.code === "paperclip_rate_limited") state.nextEligibleAt = new Date(now() + rateLimitBackoffMs(error.retryAfterMs)).toISOString();
       await ports.save(state);
       break;
     }
@@ -191,12 +225,11 @@ export async function syncCompany(config: BsmConfig, ports: SyncPorts): Promise<
   // Any source/apply error suppresses this pass and does not advance success time.
   if (!budgetExpired && snapshot.complete && !hadFailure && config.archiveOnRemoval === true) {
     const evidence = { ...(configChanged ? {} : ports.absenceEvidence ?? {}) };
-    const selectedProjects = new Set(config.bsmProjectIds as string[]);
     for (const target of owned) {
       const meta = target.providerMetadata as Partial<SecretOwnership>;
       const id = meta.bsmSecretId!;
-      // Shrinking the allowlist is a config migration, never removal evidence.
-      if (!selectedProjects.has(String(meta.bsmProjectId))) continue;
+      // Shrinking the scope (project or individual secret) is a config migration, never removal evidence.
+      if (!selectionAdmits(selection, String(meta.bsmProjectId), id)) continue;
       if (desired.has(id) || target.status !== "active") { delete evidence[id]; continue; }
       const prior = evidence[id];
       const count = prior?.fingerprint === fingerprint ? prior.count + 1 : 1;
@@ -210,13 +243,14 @@ export async function syncCompany(config: BsmConfig, ports: SyncPorts): Promise<
           await ports.native.archive(target.id);
           item.phase = "applied";
           delete evidence[id];
-          counts.archived++;
+          counts.archived++; summary.archived++;
           mutations++;
           await ports.save(state);
         } catch (error) {
           hadFailure = true;
-          counts.failed++;
+          counts.failed++; summary.failed++;
           state.errorCode = safeErrorCode(error);
+          if (error instanceof AdapterError && error.code === "paperclip_rate_limited") state.nextEligibleAt = new Date(now() + rateLimitBackoffMs(error.retryAfterMs)).toISOString();
           await ports.save(state);
           break;
         }
@@ -227,12 +261,16 @@ export async function syncCompany(config: BsmConfig, ports: SyncPorts): Promise<
 
   state.destinationVersions = versions;
   state.counts = counts;
+  state.lastRunSummary = summary;
+  // Reappeared archived sources are never reactivated; the warning clears once none remain.
+  if (skippedArchived > 0) state.warningCode = "archived_source_reappeared";
+  else if (state.warningCode === "archived_source_reappeared") state.warningCode = undefined;
   state.lastDurationMs = Math.max(0, now() - startedAt);
   if (!configChanged || ports.absenceEvidence) state.absenceEvidence = ports.absenceEvidence;
   state.status = hadFailure || budgetExpired ? "partial" : snapshot.complete ? "success" : "partial";
   if (budgetExpired && !state.errorCode) state.errorCode = "time_budget_exhausted";
   if (!snapshot.complete && !state.errorCode) state.errorCode = "snapshot_incomplete";
-  if (!hadFailure && snapshot.complete) state.lastSuccessAt = new Date(now()).toISOString();
+  if (!hadFailure && !budgetExpired && snapshot.complete) state.lastSuccessAt = new Date(now()).toISOString();
   state.itemJournal = (state.itemJournal ?? []).filter(item => item.phase !== "applied");
   await ports.save(state);
   void mutations;

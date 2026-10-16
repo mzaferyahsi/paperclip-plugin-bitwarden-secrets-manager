@@ -36,7 +36,22 @@ test("BWSM snapshot fetches complete selected values and rejects partial batches
     list: async () => ({ success: true, data: { data: [{ id: source.id, organizationId: source.organizationId }] } }),
     getByIds: async () => ({ success: true, data: { data: [source] } }),
   }) });
+  // The real SDK list carries no project, so the value read supplies it and the project then decides.
   assert.deepEqual((await readBsmSnapshot(wrapped, "org-1", new Set(["project-1"]))).secrets, [source]);
+  assert.deepEqual((await readBsmSnapshot(wrapped, "org-1", new Set(["project-2"]))).secrets, [], "out-of-selection value is dropped");
+  let reads = 0;
+  const noMembership = { listSecretIds: async () => [{ id: source.id, organizationId: "org-1" }], getSecrets: async () => { reads++; return [source]; } };
+  assert.deepEqual((await readBsmSnapshot(noMembership, "org-1", [{ projectId: "project-1", mode: "selected", secretIds: [source.id] }])).secrets, [source]);
+  assert.equal(reads, 1);
+  reads = 0;
+  // A membership-bearing list admits only IDs in the chosen project; a wrong-project ID is never fetched.
+  const withMembership = { listSecretIds: async () => [
+    { id: source.id, organizationId: "org-1", projectId: "project-1" },
+    { id: "source-2", organizationId: "org-1", projectId: "project-2" },
+  ], getSecrets: async (ids: readonly string[]) => { reads += ids.length; return ids.map(() => source); } };
+  const sel = (ids: string[]) => [{ projectId: "project-1", mode: "selected" as const, secretIds: ids }];
+  assert.deepEqual((await readBsmSnapshot(withMembership, "org-1", sel([source.id, "source-2"]))).secrets, [source]);
+  assert.equal(reads, 1, "source-2 belongs to project-2 and was never requested");
   await assert.rejects(() => readBsmSnapshot({ ...sdk, getSecrets: async () => [] }, "org-1", new Set(["project-1"])),
     (error: unknown) => error instanceof AdapterError && error.code === "snapshot_incomplete");
   const whitespaceSnapshot = await readBsmSnapshot({
@@ -166,5 +181,5 @@ test("accepts the unwrapped shape of the shipped SDK and maps thrown failures", 
   } as any);
   assert.deepEqual(await sdk.listSecretIds("o1"), [{ id: "s1", organizationId: "o1" }]);
   assert.deepEqual(await sdk.listProjects!("o1"), [{ id: "p1", organizationId: "o1", name: "Staging" }]);
-  await assert.rejects(() => sdk.getSecrets(["s1"]), (e: any) => e.code === "configuration_required" || e.message === "configuration_required");
+  await assert.rejects(() => sdk.getSecrets(["s1"]), (e: any) => e.code === "bsm_credential_rejected");
 });
